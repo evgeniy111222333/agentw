@@ -57,6 +57,10 @@ describe('ActionDiscovery', () => {
     expect(actions).toContainEqual(expect.objectContaining({
       action: 'fs'
     }));
+
+    expect(actions).toContainEqual(expect.objectContaining({
+      action: 'invalidate_cache'
+    }));
   });
 
   it('does not expose targeted actions for disabled elements', () => {

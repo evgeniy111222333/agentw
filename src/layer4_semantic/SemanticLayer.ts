@@ -8,6 +8,8 @@ import { DOMTraverser } from './traverser/DOMTraverser';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { SemanticElement, SemanticSnapshot, SessionInfo, SnapshotMeta } from '../common/types';
 import { createDefaultPluginRegistry, PluginRegistry } from '../plugins/PluginRegistry';
+import { globalMetrics } from '../common/MetricsRegistry';
+import { globalSemCache, semKey } from '../cache/Sem';
 
 export interface SnapshotBuildOptions {
   previousSnapshot?: SemanticSnapshot;
@@ -47,8 +49,18 @@ export class SemanticLayer {
 
   async createSnapshot(page: Page, options: SnapshotBuildOptions): Promise<SemanticSnapshot> {
     const extractionStart = performance.now();
-    const traversal = await this.traverser.traverse(page);
     const config = ConfigurationManager.getInstance().getConfig().semantic;
+    const cache = config.cache_enabled ? await semKey(page) : undefined;
+    if (cache) {
+      const cached = globalSemCache.get(cache.key, config.cache_ttl_ms);
+      if (cached) {
+        globalMetrics.increment('llm_browser_semantic_cache_hits_total');
+        return this.fromCache(cached.snapshot, options, extractionStart, cache.key, cached.age_ms);
+      }
+      globalMetrics.increment('llm_browser_semantic_cache_misses_total');
+    }
+
+    const traversal = await this.traverser.traverse(page);
 
     const allElements = traversal.nodes.map((node): SemanticElement => {
       const type = this.classifier.classify(node);
@@ -103,6 +115,9 @@ export class SemanticLayer {
       dom_nodes_count: traversal.stats.dom_nodes_count,
       semantic_nodes_count: elements.length,
       raw_dom_bytes: traversal.stats.raw_dom_bytes,
+      cache_status: cache ? 'miss' : 'disabled',
+      cache_key: cache?.key,
+      cache_entries: globalSemCache.stats().entries,
       incomplete,
       trace_id: options.traceId,
       plugin_contributions: {
@@ -119,7 +134,43 @@ export class SemanticLayer {
       traversal.stats.raw_dom_bytes > 0 ? Number((snapshotBytes / traversal.stats.raw_dom_bytes).toFixed(4)) : undefined;
 
     snapshot.delta = this.differ.diff(options.previousSnapshot, snapshot);
+    if (cache) {
+      globalSemCache.set(cache.key, snapshot, config.cache_max_entries);
+      globalMetrics.increment('llm_browser_semantic_cache_writes_total');
+    }
 
+    return snapshot;
+  }
+
+  private fromCache(
+    cached: SemanticSnapshot,
+    options: SnapshotBuildOptions,
+    extractionStart: number,
+    cacheKey: string,
+    cacheAgeMs: number
+  ): SemanticSnapshot {
+    const snapshot: SemanticSnapshot = clone(cached);
+    snapshot.snapshot_id = randomUUID();
+    snapshot.timestamp = new Date().toISOString();
+    snapshot.session = options.session;
+    const meta: SnapshotMeta = dropUndefined({
+      ...(snapshot.meta ?? {}),
+      page_load_time: options.pageLoadTime,
+      action_time: options.actionTime,
+      total_time: options.totalTime,
+      extraction_time: Math.round(performance.now() - extractionStart),
+      trace_id: options.traceId,
+      cache_status: 'hit' as const,
+      cache_key: cacheKey,
+      cache_age_ms: cacheAgeMs,
+      cache_entries: globalSemCache.stats().entries,
+    });
+    snapshot.meta = meta;
+    delete snapshot.delta;
+    const snapshotBytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
+    meta.snapshot_bytes = snapshotBytes;
+    meta.token_estimate = Math.ceil(snapshotBytes / 4);
+    snapshot.delta = this.differ.diff(options.previousSnapshot, snapshot);
     return snapshot;
   }
 }
@@ -182,4 +233,8 @@ function dropUndefined<T extends Record<string, any>>(value: T): T {
     }
   }
   return value;
+}
+
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
 }

@@ -4,6 +4,7 @@ import { SemanticElement } from '../common/types';
 import { globalEventBus } from '../common/EventBus';
 import { FlowStep, FlowStepResult, PAR_ACTIONS, assertSteps, report, stepParams, stepTarget } from '../flow/Flow';
 import { Box } from '../file/Box';
+import { globalSemCache } from '../cache/Sem';
 
 export interface ActionExecutionResult {
   action: string;
@@ -224,6 +225,13 @@ export class ActionExecutor {
 
       case 'snapshot':
         return;
+
+      case 'invalidate_cache':
+        globalSemCache.clear();
+        return {
+          cache: 'semantic',
+          invalidated: true,
+        };
 
       default:
         throw new Error(`Unsupported action: ${action}`);

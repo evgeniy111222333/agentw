@@ -23,6 +23,7 @@ const operatorActions = new Set([
   'go_back',
   'hover',
   'if',
+  'invalidate_cache',
   'keyboard',
   'loop',
   'multi_click',

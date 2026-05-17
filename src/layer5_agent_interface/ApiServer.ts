@@ -16,6 +16,7 @@ import { createDefaultPluginRegistry } from '../plugins/PluginRegistry';
 import { Probe } from '../health/Probe';
 import { importedActions, importedSession, importedSnapshot, makePack, readPack } from '../session/Pack';
 import { globalTraceStore } from '../trace/Trace';
+import { globalSemCache } from '../cache/Sem';
 
 export class ApiServer {
   private app = express();
@@ -68,6 +69,19 @@ export class ApiServer {
         return this.sendRestError(res, new LlmBrowserError('ELEMENT_NOT_FOUND', 'Trace not found', { trace_id: req.params.traceId }));
       }
       res.json(trace);
+    });
+
+    this.app.get('/api/v2/cache/semantic', (_req, res) => {
+      res.json({
+        stats: globalSemCache.stats(),
+        entries: globalSemCache.list(),
+      });
+    });
+
+    this.app.delete('/api/v2/cache/semantic', (_req, res) => {
+      globalSemCache.clear();
+      globalMetrics.increment('llm_browser_semantic_cache_cleared_total');
+      res.status(204).send();
     });
 
     this.app.get('/api/v2/plugins', (req, res) => {

@@ -29,6 +29,7 @@ Default API:
 - `GET /api/v2/sessions/:id/diagnostics`
 - `GET /api/v2/audit`
 - `GET /api/v2/traces`
+- `GET /api/v2/cache/semantic`
 - `GET /api/v2/plugins`
 - `GET /api/v2/ops`
 - `GET /metrics`
@@ -101,6 +102,22 @@ REST endpoints:
 
 - `GET /api/v2/traces`
 - `GET /api/v2/traces/:traceId`
+
+## Semantic Cache
+
+Stable pages are fingerprinted from normalized DOM and live form values. Repeated snapshots can be reused from the semantic cache; cache state is visible in `snapshot.meta.cache_status`.
+
+```ts
+const first = await session.snapshot();
+const second = await session.snapshot();
+const cache = await client.getSemanticCache();
+await session.invalidateCache();
+```
+
+REST endpoints:
+
+- `GET /api/v2/cache/semantic`
+- `DELETE /api/v2/cache/semantic`
 
 ## Plugin Registry and SAM
 
@@ -198,3 +215,6 @@ Useful environment variables:
 - `LLM_BROWSER_FILE_ROOT`
 - `LLM_BROWSER_MAX_FILE_BYTES`
 - `LLM_BROWSER_FILE_DELETE_ENABLED`
+- `LLM_BROWSER_SEMANTIC_CACHE_ENABLED`
+- `LLM_BROWSER_SEMANTIC_CACHE_TTL_MS`
+- `LLM_BROWSER_SEMANTIC_CACHE_MAX_ENTRIES`

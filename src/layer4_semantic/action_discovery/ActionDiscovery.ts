@@ -199,6 +199,12 @@ export class ActionDiscovery {
           },
         },
         risk: 'medium',
+      },
+      {
+        action_id: 'invalidate_cache',
+        action: 'invalidate_cache',
+        label: 'Invalidate semantic cache',
+        risk: 'medium',
       }
     );
 

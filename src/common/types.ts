@@ -63,6 +63,10 @@ export interface SnapshotMeta {
   snapshot_bytes?: number;
   token_estimate?: number;
   compression_ratio?: number;
+  cache_status?: 'hit' | 'miss' | 'disabled';
+  cache_key?: string;
+  cache_age_ms?: number;
+  cache_entries?: number;
   incomplete?: boolean;
   trace_id?: string;
   plugin_contributions?: {

@@ -12,6 +12,7 @@ export type BrowserAction =
   | 'go_back'
   | 'hover'
   | 'if'
+  | 'invalidate_cache'
   | 'keyboard'
   | 'loop'
   | 'multi_click'
@@ -123,6 +124,27 @@ export interface TraceRecord {
   };
 }
 
+export interface SemanticCacheInfo {
+  stats: {
+    entries: number;
+    hits: number;
+    misses: number;
+    writes: number;
+    evictions: number;
+    stale: number;
+    bytes: number;
+  };
+  entries: Array<{
+    key: string;
+    url: string;
+    title: string;
+    created_at: string;
+    last_hit_at?: string;
+    hits: number;
+    bytes: number;
+  }>;
+}
+
 export interface Pagination<T> {
   data: T[];
   pagination: {
@@ -211,6 +233,8 @@ export interface BrowserClientContract {
   listOps(sessionId?: string): Promise<Pagination<OpStatus>>;
   listTraces(sessionId?: string): Promise<Pagination<TraceRecord>>;
   getTrace(traceId: string): Promise<TraceRecord>;
+  getSemanticCache(): Promise<SemanticCacheInfo>;
+  clearSemanticCache(): Promise<void>;
   getAudit(sessionId?: string): Promise<Pagination<any>>;
 }
 
@@ -235,6 +259,7 @@ export interface BrowserSessionContract {
   upload(targetId: string, file: Record<string, any>): Promise<CommandResult>;
   download(targetId?: string, options?: Record<string, any>): Promise<CommandResult>;
   fs(operation: 'list' | 'read' | 'write' | 'delete', path?: string, options?: Record<string, any>): Promise<CommandResult>;
+  invalidateCache(): Promise<CommandResult>;
   close(): Promise<void>;
 }
 

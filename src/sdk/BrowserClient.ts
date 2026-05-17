@@ -13,6 +13,7 @@ import {
   Pagination,
   PluginRuntimeInfo,
   SessionPack,
+  SemanticCacheInfo,
   TraceRecord,
 } from './types';
 import { ActionRecord, SessionState } from '../common/types';
@@ -78,6 +79,17 @@ export class BrowserClient {
 
   async getTrace(traceId: string): Promise<TraceRecord> {
     return this.request(`/api/v2/traces/${encodeURIComponent(traceId)}`);
+  }
+
+  async getSemanticCache(): Promise<SemanticCacheInfo> {
+    return this.request('/api/v2/cache/semantic');
+  }
+
+  async clearSemanticCache(): Promise<void> {
+    await this.request('/api/v2/cache/semantic', {
+      method: 'DELETE',
+      expectJson: false,
+    });
   }
 
   async getSession(sessionId: string): Promise<SessionState> {
@@ -347,6 +359,10 @@ export class BrowserSession {
         path,
       },
     });
+  }
+
+  invalidateCache(): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'invalidate_cache');
   }
 
   start(action: BrowserAction | string, options: ExecuteActionOptions = {}): Promise<OpStart> {

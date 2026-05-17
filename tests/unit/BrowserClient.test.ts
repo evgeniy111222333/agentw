@@ -134,6 +134,13 @@ describe('BrowserClient SDK', () => {
       if (url === 'http://example.test/api/v2/traces/trace-1') {
         return jsonResponse(traceRecord());
       }
+      if (url === 'http://example.test/api/v2/cache/semantic') {
+        if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+        return jsonResponse({
+          stats: { entries: 1, hits: 2, misses: 1, writes: 1, evictions: 0, stale: 0, bytes: 100 },
+          entries: [{ key: 'cache-1', url: 'https://example.test', title: 'Example', created_at: '2026-05-18T00:00:00.000Z', hits: 2, bytes: 100 }],
+        });
+      }
       throw new Error(`unexpected url ${url}`);
     }) as any;
 
@@ -143,11 +150,14 @@ describe('BrowserClient SDK', () => {
     const diagnostics = await imported.diagnostics();
     const traces = await imported.traces();
     const trace = await client.getTrace('trace-1');
+    const cache = await client.getSemanticCache();
+    await client.clearSemanticCache();
 
     expect(imported.id).toBe('session-2');
     expect(diagnostics.health.status).toBe('ok');
     expect(traces.data[0].trace_id).toBe('trace-1');
     expect(trace.spans[0].name).toBe('semantic.extract');
+    expect(cache.stats.entries).toBe(1);
   });
 
 

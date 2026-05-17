@@ -11,6 +11,9 @@ export interface SemanticConfig {
   visible_only: boolean;
   group_similar: boolean;
   extraction_timeout_ms: number;
+  cache_enabled: boolean;
+  cache_ttl_ms: number;
+  cache_max_entries: number;
 }
 
 export interface SecurityConfig {
@@ -90,6 +93,9 @@ export class ConfigurationManager {
         visible_only: true,
         group_similar: true,
         extraction_timeout_ms: 2000,
+        cache_enabled: envBoolean('LLM_BROWSER_SEMANTIC_CACHE_ENABLED', true),
+        cache_ttl_ms: envNumber('LLM_BROWSER_SEMANTIC_CACHE_TTL_MS', 30000),
+        cache_max_entries: envNumber('LLM_BROWSER_SEMANTIC_CACHE_MAX_ENTRIES', 250),
       },
       security: {
         rate_limit_per_minute: envNumber('LLM_BROWSER_RATE_LIMIT_PER_MINUTE', 60),

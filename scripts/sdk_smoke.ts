@@ -65,6 +65,10 @@ async function main() {
     const diagnostics = await session.diagnostics();
     const traces = await session.traces();
     const navigateTrace = await client.getTrace(navigate.metadata.trace_id);
+    const cacheProbeOne = await session.snapshot();
+    const cacheProbeTwo = await session.snapshot();
+    const semanticCache = await client.getSemanticCache();
+    const invalidated = await session.invalidateCache();
 
     const actions = await client.listActions(session.id);
     const audit = await client.getAudit(session.id);
@@ -118,6 +122,14 @@ async function main() {
             total: traces.pagination.total_count,
             navigate_trace_status: navigateTrace.status,
             navigate_spans: navigateTrace.spans.map((span) => span.name),
+          },
+          semantic_cache: {
+            entries: semanticCache.stats.entries,
+            hits: semanticCache.stats.hits,
+            misses: semanticCache.stats.misses,
+            probe_one: cacheProbeOne.snapshot.meta?.cache_status,
+            probe_two: cacheProbeTwo.snapshot.meta?.cache_status,
+            invalidated: invalidated.data?.invalidated,
           },
           ws_snapshot_elements: wsSnapshot.snapshot.elements.length,
           actions_recorded: actions.pagination.total_count,

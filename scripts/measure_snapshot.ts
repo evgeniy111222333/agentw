@@ -21,6 +21,10 @@ async function main() {
     };
 
     const first = await semanticLayer.createSnapshot(page, { session });
+    const repeat = await semanticLayer.createSnapshot(page, {
+      session,
+      previousSnapshot: first,
+    });
     await page.getByRole('button', { name: 'Add credits' }).click();
     const second = await semanticLayer.createSnapshot(page, {
       session: { ...session, history_length: 1 },
@@ -45,6 +49,13 @@ async function main() {
         file_actions: first.available_actions.filter((action) =>
           ['upload', 'download', 'screenshot_file', 'pdf', 'fs'].includes(action.action)
         ).length,
+        cache_status: first.meta?.cache_status,
+      },
+      repeat_snapshot: {
+        extraction_ms: repeat.meta?.extraction_time,
+        cache_status: repeat.meta?.cache_status,
+        cache_age_ms: repeat.meta?.cache_age_ms,
+        delta_operations: repeat.delta?.operations.length ?? 0,
       },
       second_snapshot: {
         elements: second.elements.length,
@@ -52,6 +63,7 @@ async function main() {
         extraction_ms: second.meta?.extraction_time,
         delta_operations: second.delta?.operations.length ?? 0,
         delta_stats: second.delta?.stats,
+        cache_status: second.meta?.cache_status,
         plugin_contributions: second.meta?.plugin_contributions,
       },
     };

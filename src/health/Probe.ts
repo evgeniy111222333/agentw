@@ -5,6 +5,7 @@ import { globalMetrics } from '../common/MetricsRegistry';
 import { PluginRegistry } from '../plugins/PluginRegistry';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { globalTraceStore } from '../trace/Trace';
+import { globalSemCache } from '../cache/Sem';
 
 export class Probe {
   constructor(
@@ -26,6 +27,7 @@ export class Probe {
     const recentErrors = recentAudit.filter((event) => event.result !== 'success');
     const browser = this.browserCore.stats();
     const traces = globalTraceStore.stats();
+    const cache = globalSemCache.stats();
     const maxSessions = ConfigurationManager.getInstance().getConfig().server.max_sessions;
 
     const score = clamp01(
@@ -62,6 +64,7 @@ export class Probe {
           recent_errors: recentErrors.length,
         },
         traces,
+        semantic_cache: cache,
       },
       signals: {
         stale_sessions: staleSessions.map((session) => ({

@@ -105,6 +105,7 @@ const actionSchemas: Record<string, ActionSchema> = {
     },
   },
   if: { target: 'none', requiredParams: ['condition'] },
+  invalidate_cache: { target: 'none' },
   loop: {
     target: 'none',
     validate: (params) => {

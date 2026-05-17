@@ -219,6 +219,17 @@ async function main() {
     assertOk(traceResponse, 'trace detail');
     const trace = await traceResponse.json();
 
+    const cacheProbeOneResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/snapshot`);
+    assertOk(cacheProbeOneResponse, 'cache probe one');
+    const cacheProbeOne = await cacheProbeOneResponse.json();
+    const cacheProbeTwoResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/snapshot`);
+    assertOk(cacheProbeTwoResponse, 'cache probe two');
+    const cacheProbeTwo = await cacheProbeTwoResponse.json();
+
+    const cacheResponse = await fetch(`${baseUrl}/api/v2/cache/semantic`);
+    assertOk(cacheResponse, 'semantic cache');
+    const cache = await cacheResponse.json();
+
     const snapshotResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/snapshot`);
     assertOk(snapshotResponse, 'snapshot');
     const snapshot = await snapshotResponse.json();
@@ -304,6 +315,13 @@ async function main() {
         total: traces.pagination.total_count,
         navigate_trace_status: trace.status,
         navigate_spans: trace.spans.map((span: any) => span.name),
+      },
+      semantic_cache: {
+        entries: cache.stats.entries,
+        hits: cache.stats.hits,
+        misses: cache.stats.misses,
+        probe_one: cacheProbeOne.snapshot.meta?.cache_status,
+        probe_two: cacheProbeTwo.snapshot.meta?.cache_status,
       },
       rest_snapshot_elements: snapshot.snapshot.elements.length,
       recorded_actions: actions.pagination.total_count,
