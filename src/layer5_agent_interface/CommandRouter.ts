@@ -363,6 +363,9 @@ export class CommandRouter {
         title: snapshot.title,
         snapshot_id: snapshot.snapshot_id,
       });
+      if (snapshot.auth) {
+        this.stateManager.updateSession(command.session_id, { auth: snapshot.auth });
+      }
 
       const totalTime = Math.round(performance.now() - requestStart);
       if (snapshot.meta) snapshot.meta.total_time = totalTime;

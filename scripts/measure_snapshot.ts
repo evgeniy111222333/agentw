@@ -49,6 +49,12 @@ async function main() {
         file_actions: first.available_actions.filter((action) =>
           ['upload', 'download', 'screenshot_file', 'pdf', 'fs'].includes(action.action)
         ).length,
+        auth: {
+          authenticated: first.auth?.authenticated,
+          method: first.auth?.method,
+          confidence: first.auth?.confidence,
+          indicators: first.auth?.indicators,
+        },
         cache_status: first.meta?.cache_status,
       },
       repeat_snapshot: {
@@ -96,6 +102,8 @@ function benchmarkHtml(): string {
     </nav>
     <main>
       <h1>Checkout</h1>
+      <p id="account">Signed in as measure@example.com</p>
+      <button id="logout">Logout</button>
       <p class="muted">A compact benchmark page with links, form fields, table data, and dynamic state.</p>
       <form id="checkout" method="post" action="/pay" autocomplete="on">
         <label>Email <input name="email" type="email" required placeholder="you@example.com"></label>

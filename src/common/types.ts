@@ -118,7 +118,39 @@ export interface SemanticSnapshot {
   forms?: any[];
   alerts?: any[];
   navigation?: any;
+  auth?: AuthState;
   delta?: SemanticDelta;
+}
+
+export interface AuthCookieInfo {
+  name: string;
+  domain?: string;
+  path?: string;
+  expires_at?: string;
+  http_only?: boolean;
+  secure?: boolean;
+  same_site?: string;
+}
+
+export interface OAuthState {
+  detected: boolean;
+  provider?: string;
+  stage?: 'authorize' | 'callback' | 'unknown';
+  has_state?: boolean;
+  has_code?: boolean;
+}
+
+export interface AuthState {
+  authenticated: boolean;
+  confidence: number;
+  method?: 'cookie' | 'oauth' | 'token' | 'basic' | 'form' | 'unknown';
+  session_expires_at?: string;
+  user_identity?: string;
+  indicators: string[];
+  cookies: AuthCookieInfo[];
+  oauth?: OAuthState;
+  login_form_detected?: boolean;
+  updated_at: string;
 }
 
 export interface SessionState {
@@ -132,6 +164,7 @@ export interface SessionState {
   localStorage: Record<string, string>;
   history: Array<{ url: string; timestamp: string; navigation_type?: string; referrer?: string }>;
   configuration: any;
+  auth?: AuthState;
 }
 
 export interface ActionRecord {

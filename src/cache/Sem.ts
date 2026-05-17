@@ -67,6 +67,7 @@ export class SemCache {
   set(key: string, snapshot: SemanticSnapshot, maxEntries: number): void {
     const storedSnapshot = clone(snapshot);
     delete storedSnapshot.delta;
+    delete storedSnapshot.auth;
     const bytes = Buffer.byteLength(JSON.stringify(storedSnapshot), 'utf8');
     const existing = this.entries.get(key);
     const entry: StoredEntry = {

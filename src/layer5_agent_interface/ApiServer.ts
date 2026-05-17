@@ -275,6 +275,20 @@ export class ApiServer {
       res.json(action);
     });
 
+    this.app.get('/api/v2/sessions/:id/auth', (req, res) => {
+      const session = this.stateManager.getSessionState(req.params.id);
+      if (!session) {
+        return this.sendRestError(res, new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found'));
+      }
+      res.json(session.auth ?? {
+        authenticated: false,
+        confidence: 0.5,
+        indicators: ['not_inspected'],
+        cookies: [],
+        updated_at: session.updated_at,
+      });
+    });
+
     this.app.get('/api/v2/sessions/:id', (req, res) => {
       const session = this.stateManager.getSessionState(req.params.id);
       if (!session) {

@@ -43,7 +43,22 @@ describe('Semantic cache', () => {
   });
 
   it('reuses unchanged semantic snapshots and invalidates after DOM changes', async () => {
-    const layer = new SemanticLayer();
+    let authCalls = 0;
+    const layer = new SemanticLayer({
+      authTracker: {
+        inspect: jest.fn(async () => {
+          authCalls += 1;
+          return {
+            authenticated: authCalls > 1,
+            confidence: 1,
+            method: authCalls > 1 ? 'cookie' : undefined,
+            indicators: [`auth-call-${authCalls}`],
+            cookies: [],
+            updated_at: `2026-05-18T00:00:0${authCalls}.000Z`,
+          };
+        }),
+      } as any,
+    });
     const session = {
       session_id: 'cache-session',
       tab_id: 'tab-1',
@@ -60,6 +75,8 @@ describe('Semantic cache', () => {
     expect(first.meta?.cache_status).toBe('miss');
     expect(second.meta?.cache_status).toBe('hit');
     expect(second.snapshot_id).not.toBe(first.snapshot_id);
+    expect(first.auth?.indicators).toContain('auth-call-1');
+    expect(second.auth?.indicators).toContain('auth-call-2');
     expect(third.meta?.cache_status).toBe('miss');
     expect(third.elements.find((element) => element.id === 'status')?.text).toBe('changed');
     expect(globalSemCache.stats()).toEqual(expect.objectContaining({

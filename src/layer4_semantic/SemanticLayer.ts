@@ -10,6 +10,7 @@ import { SemanticElement, SemanticSnapshot, SessionInfo, SnapshotMeta } from '..
 import { createDefaultPluginRegistry, PluginRegistry } from '../plugins/PluginRegistry';
 import { globalMetrics } from '../common/MetricsRegistry';
 import { globalSemCache, semKey } from '../cache/Sem';
+import { AuthTracker } from '../auth/Auth';
 
 export interface SnapshotBuildOptions {
   previousSnapshot?: SemanticSnapshot;
@@ -27,6 +28,7 @@ export interface SemanticLayerDependencies {
   actionDiscovery?: ActionDiscovery;
   differ?: SnapshotDiffer;
   pluginRegistry?: PluginRegistry;
+  authTracker?: AuthTracker;
 }
 
 export class SemanticLayer {
@@ -36,6 +38,7 @@ export class SemanticLayer {
   private actionDiscovery: ActionDiscovery;
   private differ: SnapshotDiffer;
   private pluginRegistry: PluginRegistry;
+  private authTracker: AuthTracker;
 
   constructor(dependencies: SemanticLayerDependencies = {}) {
     const config = ConfigurationManager.getInstance().getConfig();
@@ -45,6 +48,7 @@ export class SemanticLayer {
     this.actionDiscovery = dependencies.actionDiscovery ?? new ActionDiscovery();
     this.differ = dependencies.differ ?? new SnapshotDiffer();
     this.pluginRegistry = dependencies.pluginRegistry ?? createDefaultPluginRegistry(config.plugin_registry);
+    this.authTracker = dependencies.authTracker ?? new AuthTracker();
   }
 
   async createSnapshot(page: Page, options: SnapshotBuildOptions): Promise<SemanticSnapshot> {
@@ -55,7 +59,7 @@ export class SemanticLayer {
       const cached = globalSemCache.get(cache.key, config.cache_ttl_ms);
       if (cached) {
         globalMetrics.increment('llm_browser_semantic_cache_hits_total');
-        return this.fromCache(cached.snapshot, options, extractionStart, cache.key, cached.age_ms);
+        return this.fromCache(page, cached.snapshot, options, extractionStart, cache.key, cached.age_ms);
       }
       globalMetrics.increment('llm_browser_semantic_cache_misses_total');
     }
@@ -94,7 +98,7 @@ export class SemanticLayer {
 
     const snapshot: SemanticSnapshot = {
       snapshot_id: randomUUID(),
-      version: '2.1.0',
+      version: '2.2.0',
       url: page.url(),
       title,
       timestamp,
@@ -105,6 +109,8 @@ export class SemanticLayer {
       alerts: collectAlerts(elements),
       navigation: collectNavigation(elements, traversal.stats.below_fold_count),
     };
+    snapshot.auth = await this.authTracker.inspect(page, snapshot);
+    recordAuthMetrics(snapshot.auth.authenticated);
 
     const extractionTime = Math.round(performance.now() - extractionStart);
     const meta: SnapshotMeta = {
@@ -142,17 +148,20 @@ export class SemanticLayer {
     return snapshot;
   }
 
-  private fromCache(
+  private async fromCache(
+    page: Page,
     cached: SemanticSnapshot,
     options: SnapshotBuildOptions,
     extractionStart: number,
     cacheKey: string,
     cacheAgeMs: number
-  ): SemanticSnapshot {
+  ): Promise<SemanticSnapshot> {
     const snapshot: SemanticSnapshot = clone(cached);
     snapshot.snapshot_id = randomUUID();
     snapshot.timestamp = new Date().toISOString();
     snapshot.session = options.session;
+    snapshot.auth = await this.authTracker.inspect(page, snapshot);
+    recordAuthMetrics(snapshot.auth.authenticated);
     const meta: SnapshotMeta = dropUndefined({
       ...(snapshot.meta ?? {}),
       page_load_time: options.pageLoadTime,
@@ -237,4 +246,8 @@ function dropUndefined<T extends Record<string, any>>(value: T): T {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
+}
+
+function recordAuthMetrics(authenticated: boolean): void {
+  globalMetrics.increment(authenticated ? 'llm_browser_auth_authenticated_total' : 'llm_browser_auth_anonymous_total');
 }

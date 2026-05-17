@@ -63,6 +63,7 @@ async function main() {
     importedSession = await client.importSession(sessionPack);
     const importedSnapshot = await importedSession.snapshot();
     const diagnostics = await session.diagnostics();
+    const auth = await session.auth();
     const traces = await session.traces();
     const navigateTrace = await client.getTrace(navigate.metadata.trace_id);
     const cacheProbeOne = await session.snapshot();
@@ -117,6 +118,16 @@ async function main() {
           diagnostics: {
             health_score: diagnostics.health.health_score,
             action_total: diagnostics.actions.total,
+            auth: {
+              authenticated: diagnostics.session.auth?.authenticated,
+              method: diagnostics.session.auth?.method,
+            },
+          },
+          auth: {
+            authenticated: auth.authenticated,
+            method: auth.method,
+            confidence: auth.confidence,
+            indicators: auth.indicators,
           },
           traces: {
             total: traces.pagination.total_count,
@@ -176,6 +187,8 @@ function smokeHtml(): string {
   <body>
     <main>
       <h1>SDK Smoke</h1>
+      <p id="account">Signed in as sdk@example.com</p>
+      <button id="logout">Logout</button>
       <form id="profile">
         <label>Email <input id="email" name="email" placeholder="Email"></label>
       </form>

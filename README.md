@@ -27,6 +27,7 @@ Default API:
 - `GET /api/v2/sessions/:id/snapshot`
 - `GET /api/v2/sessions/:id/export`
 - `GET /api/v2/sessions/:id/diagnostics`
+- `GET /api/v2/sessions/:id/auth`
 - `GET /api/v2/audit`
 - `GET /api/v2/traces`
 - `GET /api/v2/cache/semantic`
@@ -44,6 +45,7 @@ const client = new BrowserClient({ baseUrl: 'http://127.0.0.1:3001' });
 const session = await client.createSession();
 
 const page = await session.navigate('https://example.com');
+const auth = await session.auth();
 const action = page.snapshot.available_actions.find((item) => item.action === 'click');
 if (action?.target) {
   await session.click(action.target);
@@ -51,6 +53,22 @@ if (action?.target) {
 
 await session.close();
 ```
+
+## Auth State
+
+Semantic snapshots include `snapshot.auth`, and session diagnostics include the latest `session.auth`.
+The tracker uses sanitized cookie names/attributes, OAuth URL signals, login forms, account URLs, user identity text, and logout controls. Cookie and token values are never emitted.
+
+```ts
+const auth = await session.auth();
+if (auth.authenticated) {
+  console.log(auth.method, auth.confidence, auth.indicators);
+}
+```
+
+REST endpoint:
+
+- `GET /api/v2/sessions/:id/auth`
 
 ## File Actions
 

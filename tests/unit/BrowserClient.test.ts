@@ -125,6 +125,16 @@ describe('BrowserClient SDK', () => {
       if (url === 'http://example.test/api/v2/sessions/session-2/diagnostics') {
         return jsonResponse({ health: { status: 'ok' } });
       }
+      if (url === 'http://example.test/api/v2/sessions/session-2/auth') {
+        return jsonResponse({
+          authenticated: true,
+          confidence: 0.9,
+          method: 'cookie',
+          indicators: ['auth_cookie'],
+          cookies: [{ name: 'session_id', http_only: true }],
+          updated_at: '2026-05-18T00:00:00.000Z',
+        });
+      }
       if (url === 'http://example.test/api/v2/traces?page=1&limit=20&session_id=session-2') {
         return jsonResponse({
           data: [traceRecord()],
@@ -148,6 +158,7 @@ describe('BrowserClient SDK', () => {
     const exported = await client.exportSession('session-1');
     const imported = await client.importSession(exported, { session_id: 'session-2' });
     const diagnostics = await imported.diagnostics();
+    const auth = await imported.auth();
     const traces = await imported.traces();
     const trace = await client.getTrace('trace-1');
     const cache = await client.getSemanticCache();
@@ -155,6 +166,7 @@ describe('BrowserClient SDK', () => {
 
     expect(imported.id).toBe('session-2');
     expect(diagnostics.health.status).toBe('ok');
+    expect(auth).toEqual(expect.objectContaining({ authenticated: true, method: 'cookie' }));
     expect(traces.data[0].trace_id).toBe('trace-1');
     expect(trace.spans[0].name).toBe('semantic.extract');
     expect(cache.stats.entries).toBe(1);

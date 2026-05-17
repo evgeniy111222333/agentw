@@ -8,4 +8,5 @@ export type {
   CommandResult,
   ExecuteActionOptions,
   Pagination,
+  AuthState,
 } from './types';

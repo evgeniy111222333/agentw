@@ -16,7 +16,7 @@ import {
   SemanticCacheInfo,
   TraceRecord,
 } from './types';
-import { ActionRecord, SessionState } from '../common/types';
+import { ActionRecord, AuthState, SessionState } from '../common/types';
 
 type JsonValue = Record<string, any>;
 
@@ -98,6 +98,10 @@ export class BrowserClient {
 
   async getDiagnostics(sessionId: string): Promise<Record<string, any>> {
     return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/diagnostics`);
+  }
+
+  async getAuth(sessionId: string): Promise<AuthState> {
+    return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/auth`);
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -253,6 +257,10 @@ export class BrowserSession {
 
   diagnostics(): Promise<Record<string, any>> {
     return this.client.getDiagnostics(this.id);
+  }
+
+  auth(): Promise<AuthState> {
+    return this.client.getAuth(this.id);
   }
 
   traces(page = 1, limit = 20): Promise<Pagination<TraceRecord>> {

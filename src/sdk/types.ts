@@ -1,6 +1,7 @@
 import {
   ActionRecord,
   ActionParam,
+  AuthState,
   AvailableAction,
   SemanticSnapshot,
   SessionState,
@@ -235,6 +236,7 @@ export interface BrowserClientContract {
   getTrace(traceId: string): Promise<TraceRecord>;
   getSemanticCache(): Promise<SemanticCacheInfo>;
   clearSemanticCache(): Promise<void>;
+  getAuth(sessionId: string): Promise<AuthState>;
   getAudit(sessionId?: string): Promise<Pagination<any>>;
 }
 
@@ -243,6 +245,7 @@ export interface BrowserSessionContract {
   snapshot(): Promise<CommandResult>;
   export(): Promise<SessionPack>;
   diagnostics(): Promise<Record<string, any>>;
+  auth(): Promise<AuthState>;
   traces(): Promise<Pagination<TraceRecord>>;
   navigate(url: string): Promise<CommandResult>;
   click(targetId: string): Promise<CommandResult>;
@@ -263,4 +266,4 @@ export interface BrowserSessionContract {
   close(): Promise<void>;
 }
 
-export type { ActionRecord, AvailableAction, SemanticSnapshot, SessionState };
+export type { ActionRecord, AuthState, AvailableAction, SemanticSnapshot, SessionState };

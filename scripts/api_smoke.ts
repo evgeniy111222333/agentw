@@ -211,6 +211,10 @@ async function main() {
     assertOk(diagnosticsResponse, 'session diagnostics');
     const diagnostics = await diagnosticsResponse.json();
 
+    const authResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/auth`);
+    assertOk(authResponse, 'session auth');
+    const auth = await authResponse.json();
+
     const tracesResponse = await fetch(`${baseUrl}/api/v2/traces?session_id=${activeSessionId}`);
     assertOk(tracesResponse, 'traces');
     const traces = await tracesResponse.json();
@@ -310,6 +314,16 @@ async function main() {
       diagnostics: {
         health_score: diagnostics.health.health_score,
         action_total: diagnostics.actions.total,
+        auth: {
+          authenticated: diagnostics.session.auth?.authenticated,
+          method: diagnostics.session.auth?.method,
+        },
+      },
+      auth: {
+        authenticated: auth.authenticated,
+        method: auth.method,
+        confidence: auth.confidence,
+        indicators: auth.indicators,
       },
       traces: {
         total: traces.pagination.total_count,
@@ -473,6 +487,8 @@ function smokeHtml(): string {
   <body>
     <main>
       <h1>API Smoke</h1>
+      <p id="account">Signed in as api@example.com</p>
+      <button id="logout">Logout</button>
       <label>Search <input id="search" name="search" type="search" placeholder="Search"></label>
       <button id="search-btn" onclick="document.getElementById('results').textContent = 'alpha page 1'">Search</button>
       <button id="next-page" onclick="document.getElementById('results').textContent = 'alpha page 2'">Next</button>
