@@ -1,0 +1,439 @@
+import { ApiServer } from '../src/layer5_agent_interface/ApiServer';
+import { ConfigurationManager } from '../src/config/ConfigurationManager';
+import { WebSocket } from 'ws';
+
+const port = Number(process.env.LLM_BROWSER_SMOKE_PORT ?? 3217);
+
+async function main() {
+  const configManager = ConfigurationManager.getInstance();
+  const config = configManager.getConfig();
+  configManager.updateConfig({
+    server: {
+      ...config.server,
+      port,
+    },
+    file: {
+      ...config.file,
+      root_dir: `./.llm-browser/smoke-api-${port}`,
+    },
+  });
+
+  const server = new ApiServer();
+  await server.start();
+
+  let sessionId: string | undefined;
+  try {
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const sessionResponse = await fetch(`${baseUrl}/api/v2/sessions`, { method: 'POST' });
+    assertOk(sessionResponse, 'create session');
+    sessionId = (await sessionResponse.json()).session_id;
+    if (!sessionId) throw new Error('create session response did not include session_id');
+    const activeSessionId = sessionId;
+
+    const navigate = await rpc(baseUrl, 'navigate', {
+      session_id: activeSessionId,
+      action_params: {
+        url: `data:text/html;charset=utf-8,${encodeURIComponent(smokeHtml())}`,
+      },
+    });
+
+    const typeAction = navigate.snapshot.available_actions.find((action: any) => action.action === 'type');
+    if (!typeAction) throw new Error('type action was not discovered');
+    const samAction = navigate.snapshot.available_actions.find((action: any) => action.action === 'add_to_cart');
+    if (!samAction?.target) throw new Error('SAM add_to_cart action was not discovered');
+
+    const restType = await restAction(baseUrl, activeSessionId, {
+      action: 'type',
+      target_id: typeAction.target,
+      params: { text: 'user@example.com' },
+    });
+
+    const fillForm = await restAction(baseUrl, activeSessionId, {
+      action: 'fill_form',
+      target_id: 'contact',
+      params: {
+        fields: { email: 'flow@example.com' },
+        submit: false,
+      },
+    });
+
+    const search = await restAction(baseUrl, activeSessionId, {
+      action: 'search_and_paginate',
+      target_id: 'search',
+      params: {
+        query: 'alpha',
+        submit_id: 'search-btn',
+        collect_all_pages: true,
+        next_id: 'next-page',
+        max_pages: 2,
+      },
+    });
+
+    const conditional = await rpc(baseUrl, 'if', {
+      session_id: activeSessionId,
+      action_params: {
+        condition: { type: 'element_text_contains', element_id: 'status', text: 'idle' },
+        then: { action: 'click', target_id: 'add-button' },
+        else: { action: 'wait', params: { ms: 25 } },
+      },
+    });
+
+    const samClick = await rpc(baseUrl, 'add_to_cart', {
+      session_id: activeSessionId,
+      target_id: samAction.target,
+    });
+
+    const waitFor = await restAction(baseUrl, activeSessionId, {
+      action: 'wait_for',
+      params: {
+        condition: { type: 'element_text_contains', element_id: 'status', text: 'clicked' },
+        timeout_ms: 1000,
+        poll_interval_ms: 50,
+      },
+    });
+
+    const asyncWait = await restAction(baseUrl, activeSessionId, {
+      action: 'wait',
+      params: {
+        ms: 100,
+        async: true,
+      },
+    });
+    const asyncDone = await pollUntilOp(baseUrl, asyncWait.operation_id);
+    const rpcPoll = await rpc(baseUrl, 'poll', {
+      session_id: activeSessionId,
+      action_params: { operation_id: asyncWait.operation_id },
+    });
+
+    const cancelStart = await restAction(baseUrl, activeSessionId, {
+      action: 'wait',
+      params: {
+        ms: 500,
+        async: true,
+      },
+    });
+    const cancelled = await cancelOp(baseUrl, cancelStart.operation_id);
+
+    const click = await rpc(baseUrl, 'click', {
+      session_id: activeSessionId,
+      target_id: 'add-button',
+    });
+
+    const screenshot = await restAction(baseUrl, activeSessionId, {
+      action: 'screenshot',
+      params: { full_page: false },
+    });
+
+    const fsWrite = await restAction(baseUrl, activeSessionId, {
+      action: 'fs',
+      params: {
+        operation: 'write',
+        path: '/uploads/api.txt',
+        content: 'api-upload',
+      },
+    });
+
+    const upload = await restAction(baseUrl, activeSessionId, {
+      action: 'upload',
+      target_id: 'file-input',
+      params: {
+        file_path: fsWrite.data?.file.path,
+      },
+    });
+
+    const download = await restAction(baseUrl, activeSessionId, {
+      action: 'download',
+      target_id: 'download-link',
+      params: {
+        file_name: 'api-report.txt',
+      },
+    });
+
+    const screenshotFile = await restAction(baseUrl, activeSessionId, {
+      action: 'screenshot_file',
+      params: {
+        file_name: 'api-page.png',
+        full_page: false,
+      },
+    });
+
+    const pdf = await restAction(baseUrl, activeSessionId, {
+      action: 'pdf',
+      params: {
+        file_name: 'api-page.pdf',
+      },
+    });
+
+    const fsList = await restAction(baseUrl, activeSessionId, {
+      action: 'fs',
+      params: {
+        operation: 'list',
+        path: '/',
+      },
+    });
+
+    const batch = await rpcBatch(baseUrl, [
+      {
+        jsonrpc: '2.0',
+        method: 'snapshot',
+        params: { session_id: activeSessionId },
+        id: 'snapshot-batch',
+      },
+      {
+        jsonrpc: '2.0',
+        method: 'wait',
+        params: { session_id: activeSessionId, action_params: { ms: 50 } },
+        id: 'wait-batch',
+      },
+    ]);
+
+    const wsSnapshot = await wsRpc(activeSessionId, 'snapshot', {});
+
+    const snapshotResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/snapshot`);
+    assertOk(snapshotResponse, 'snapshot');
+    const snapshot = await snapshotResponse.json();
+
+    const actionsResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/actions`);
+    assertOk(actionsResponse, 'actions');
+    const actions = await actionsResponse.json();
+
+    const auditResponse = await fetch(`${baseUrl}/api/v2/audit?session_id=${activeSessionId}`);
+    assertOk(auditResponse, 'audit');
+    const audit = await auditResponse.json();
+
+    const pluginResponse = await fetch(`${baseUrl}/api/v2/plugins`);
+    assertOk(pluginResponse, 'plugins');
+    const plugins = await pluginResponse.json();
+
+    const opsResponse = await fetch(`${baseUrl}/api/v2/ops?session_id=${activeSessionId}`);
+    assertOk(opsResponse, 'ops');
+    const ops = await opsResponse.json();
+
+    const healthResponse = await fetch(`${baseUrl}/api/v2/health`);
+    assertOk(healthResponse, 'health');
+    const health = await healthResponse.json();
+
+    const report = {
+      session_id: activeSessionId,
+      navigate: summarizeRpc(navigate),
+      rest_type: summarizeRpc(restType),
+      fill_form: summarizeRpc(fillForm),
+      search: {
+        status: search.status,
+        pages_collected: search.data?.pages_collected,
+        timing: search.timing,
+      },
+      conditional: summarizeRpc(conditional),
+      sam_action: summarizeRpc(samClick),
+      wait_for: {
+        status: waitFor.status,
+        elapsed_ms: waitFor.data?.elapsed_ms,
+        timing: waitFor.timing,
+      },
+      async_wait: {
+        started: asyncWait.status,
+        operation_id: asyncWait.operation_id,
+        final_status: asyncDone.status,
+        rpc_poll_status: rpcPoll.status,
+      },
+      cancelled_op: {
+        started: cancelStart.status,
+        final_status: cancelled.status,
+      },
+      click: summarizeRpc(click),
+      screenshot: {
+        status: screenshot.status,
+        mime_type: screenshot.data?.mime_type,
+        image_bytes_base64: screenshot.data?.image?.length,
+      },
+      files: {
+        fs_write: fsWrite.data?.file,
+        upload_count: upload.data?.count,
+        download_file: download.data?.file,
+        screenshot_file: screenshotFile.data?.file,
+        pdf_file: pdf.data?.file,
+        root_entries: fsList.data?.entries?.length,
+      },
+      batch_results: batch.length,
+      ws_snapshot_elements: wsSnapshot.result.snapshot.elements.length,
+      rest_snapshot_elements: snapshot.snapshot.elements.length,
+      recorded_actions: actions.pagination.total_count,
+      audit_events: audit.pagination.total_count,
+      operations: ops.pagination.total_count,
+      plugins: plugins.data.map((plugin: any) => ({ name: plugin.name, status: plugin.status })),
+      health_status: health.status,
+    };
+
+    console.log(JSON.stringify(report, null, 2));
+  } finally {
+    if (sessionId) {
+      await fetch(`http://127.0.0.1:${port}/api/v2/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => undefined);
+    }
+    await server.stop();
+  }
+}
+
+async function rpc(baseUrl: string, method: string, params: Record<string, any>) {
+  const response = await fetch(`${baseUrl}/api/v2/jsonrpc`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      method,
+      params,
+      id: `${method}-1`,
+    }),
+  });
+  assertOk(response, method);
+
+  const body = await response.json();
+  if (body.error) {
+    throw new Error(`${method} failed: ${JSON.stringify(body.error)}`);
+  }
+  return body.result;
+}
+
+async function restAction(baseUrl: string, sessionId: string, body: Record<string, any>) {
+  const response = await fetch(`${baseUrl}/api/v2/sessions/${sessionId}/actions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  assertOk(response, body.action);
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(`${body.action} failed: ${JSON.stringify(result.error)}`);
+  }
+  return result;
+}
+
+async function rpcBatch(baseUrl: string, body: Record<string, any>[]) {
+  const response = await fetch(`${baseUrl}/api/v2/jsonrpc`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  assertOk(response, 'jsonrpc batch');
+  const result = await response.json();
+  if (!Array.isArray(result) || result.some((entry) => entry.error)) {
+    throw new Error(`batch failed: ${JSON.stringify(result)}`);
+  }
+  return result;
+}
+
+async function pollOp(baseUrl: string, operationId: string) {
+  const response = await fetch(`${baseUrl}/api/v2/ops/${operationId}`);
+  assertOk(response, 'poll op');
+  return response.json();
+}
+
+async function pollUntilOp(baseUrl: string, operationId: string) {
+  const started = Date.now();
+  while (Date.now() - started < 5000) {
+    const status = await pollOp(baseUrl, operationId);
+    if (['completed', 'failed', 'cancelled'].includes(status.status)) return status;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`operation ${operationId} did not finish`);
+}
+
+async function cancelOp(baseUrl: string, operationId: string) {
+  const response = await fetch(`${baseUrl}/api/v2/ops/${operationId}/cancel`, { method: 'POST' });
+  assertOk(response, 'cancel op');
+  return response.json();
+}
+
+async function wsRpc(sessionId: string, method: string, params: Record<string, any>) {
+  return new Promise<any>((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?session_id=${sessionId}`);
+    const id = `${method}-ws`;
+    const timer = setTimeout(() => {
+      socket.close();
+      reject(new Error(`WebSocket ${method} timed out`));
+    }, 5000);
+
+    socket.on('open', () => {
+      socket.send(JSON.stringify({
+        jsonrpc: '2.0',
+        method,
+        params: {
+          session_id: sessionId,
+          ...params,
+        },
+        id,
+      }));
+    });
+
+    socket.on('message', (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.type === 'connected') return;
+      if (message.id !== id) return;
+
+      clearTimeout(timer);
+      socket.close();
+      if (message.error) {
+        reject(new Error(`WebSocket ${method} failed: ${JSON.stringify(message.error)}`));
+      } else {
+        resolve(message);
+      }
+    });
+
+    socket.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+function summarizeRpc(result: any) {
+  return {
+    status: result.status,
+    elements: result.snapshot.elements.length,
+    actions: result.snapshot.available_actions.length,
+    delta_operations: result.snapshot.delta?.operations.length ?? 0,
+    timing: result.timing,
+    token_estimate: result.metadata.token_estimate,
+  };
+}
+
+function smokeHtml(): string {
+  return `<!doctype html>
+<html>
+  <head><title>API Smoke</title></head>
+  <body>
+    <main>
+      <h1>API Smoke</h1>
+      <label>Search <input id="search" name="search" type="search" placeholder="Search"></label>
+      <button id="search-btn" onclick="document.getElementById('results').textContent = 'alpha page 1'">Search</button>
+      <button id="next-page" onclick="document.getElementById('results').textContent = 'alpha page 2'">Next</button>
+      <p id="results">empty</p>
+      <button
+        id="add-button"
+        data-semantic-action="add_to_cart"
+        data-semantic-label="Add cart item"
+        data-semantic-params='{"sku":"api-credit"}'
+        onclick="document.getElementById('status').textContent = 'clicked'"
+      >Add</button>
+      <p id="status">idle</p>
+      <input id="file-input" type="file" onchange="document.getElementById('file-status').textContent = this.files[0].name + ':' + this.files[0].size">
+      <p id="file-status">empty</p>
+      <a id="download-link" download="report.txt" href="data:text/plain;base64,YXBpLXJlcG9ydA==">Download report</a>
+      <form id="contact"><input name="email" placeholder="Email"><button type="submit">Send</button></form>
+      <script type="application/llm-actions+json">
+        {"actions":[{"action":"checkout","label":"Checkout via SAM","selector":"#add-button","execution":{"action":"click"}}]}
+      </script>
+    </main>
+  </body>
+</html>`;
+}
+
+function assertOk(response: Response, label: string): void {
+  if (!response.ok) {
+    throw new Error(`${label} returned HTTP ${response.status}`);
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

@@ -1,0 +1,16 @@
+services:
+  llm-browser:
+    build:
+      context: .
+    ports:
+      - "3001:3001"
+    environment:
+      LLM_BROWSER_PORT: "3001"
+      LLM_BROWSER_RATE_LIMIT_PER_MINUTE: "60"
+      LLM_BROWSER_NAVIGATE_RATE_LIMIT_PER_MINUTE: "10"
+      LLM_BROWSER_SCREENSHOT_RATE_LIMIT_PER_MINUTE: "30"
+      LLM_BROWSER_AUDIT_ENABLED: "true"
+    shm_size: "1gb"
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
