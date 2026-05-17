@@ -6,10 +6,13 @@ import {
   CommandResult,
   CreateSessionResponse,
   ExecuteActionOptions,
+  ImportSessionOptions,
+  ImportSessionResponse,
   OpStart,
   OpStatus,
   Pagination,
   PluginRuntimeInfo,
+  SessionPack,
 } from './types';
 import { ActionRecord, SessionState } from '../common/types';
 
@@ -41,6 +44,21 @@ export class BrowserClient {
     return this.request(`/api/v2/sessions?page=${page}&limit=${limit}`);
   }
 
+  async exportSession(sessionId: string): Promise<SessionPack> {
+    return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/export`);
+  }
+
+  async importSession(pack: SessionPack, options: ImportSessionOptions = {}): Promise<BrowserSession> {
+    const response = await this.request<ImportSessionResponse>('/api/v2/sessions/import', {
+      method: 'POST',
+      body: {
+        ...options,
+        package: pack,
+      },
+    });
+    return new BrowserSession(this, response.session_id);
+  }
+
   async listPlugins(page = 1, limit = 20): Promise<Pagination<PluginRuntimeInfo>> {
     return this.request(`/api/v2/plugins?page=${page}&limit=${limit}`);
   }
@@ -53,6 +71,10 @@ export class BrowserClient {
 
   async getSession(sessionId: string): Promise<SessionState> {
     return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  async getDiagnostics(sessionId: string): Promise<Record<string, any>> {
+    return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/diagnostics`);
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -200,6 +222,14 @@ export class BrowserSession {
 
   snapshot(): Promise<CommandResult> {
     return this.client.getSnapshot(this.id);
+  }
+
+  export(): Promise<SessionPack> {
+    return this.client.exportSession(this.id);
+  }
+
+  diagnostics(): Promise<Record<string, any>> {
+    return this.client.getDiagnostics(this.id);
   }
 
   navigate(url: string): Promise<CommandResult> {

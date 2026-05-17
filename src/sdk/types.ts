@@ -126,6 +126,35 @@ export interface PluginRuntimeInfo {
   last_error?: string;
 }
 
+export interface SessionPack {
+  version: string;
+  exported_at: string;
+  session: SessionState;
+  actions: ActionRecord[];
+  browser: {
+    storage_state: Record<string, any>;
+  };
+  page: {
+    url: string;
+    title: string;
+  };
+  snapshot?: SemanticSnapshot;
+}
+
+export interface ImportSessionOptions {
+  session_id?: string;
+  navigate?: boolean;
+  url?: string;
+}
+
+export interface ImportSessionResponse {
+  session_id: string;
+  imported_from_session_id: string;
+  current_url?: string;
+  actions_imported: number;
+  snapshot_imported: boolean;
+}
+
 export interface ExecuteActionOptions {
   target_id?: string;
   params?: ActionParam;
@@ -147,6 +176,8 @@ export interface CreateSessionResponse {
 export interface BrowserClientContract {
   createSession(): Promise<BrowserSessionContract>;
   listSessions(): Promise<Pagination<SessionState>>;
+  exportSession(sessionId: string): Promise<SessionPack>;
+  importSession(pack: SessionPack, options?: ImportSessionOptions): Promise<BrowserSessionContract>;
   listPlugins(): Promise<Pagination<PluginRuntimeInfo>>;
   listOps(sessionId?: string): Promise<Pagination<OpStatus>>;
   getAudit(sessionId?: string): Promise<Pagination<any>>;
@@ -155,6 +186,8 @@ export interface BrowserClientContract {
 export interface BrowserSessionContract {
   id: string;
   snapshot(): Promise<CommandResult>;
+  export(): Promise<SessionPack>;
+  diagnostics(): Promise<Record<string, any>>;
   navigate(url: string): Promise<CommandResult>;
   click(targetId: string): Promise<CommandResult>;
   type(targetId: string, text: string, options?: Record<string, any>): Promise<CommandResult>;

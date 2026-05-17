@@ -21,9 +21,12 @@ node dist/index.js
 Default API:
 
 - `POST /api/v2/sessions`
+- `POST /api/v2/sessions/import`
 - `POST /api/v2/jsonrpc`
 - `POST /api/v2/sessions/:id/actions`
 - `GET /api/v2/sessions/:id/snapshot`
+- `GET /api/v2/sessions/:id/export`
+- `GET /api/v2/sessions/:id/diagnostics`
 - `GET /api/v2/audit`
 - `GET /api/v2/plugins`
 - `GET /api/v2/ops`
@@ -65,6 +68,23 @@ await session.download('download-link', { file_name: 'report.txt' });
 await session.screenshotFile({ file_name: 'page.png' });
 await session.pdf({ file_name: 'page.pdf' });
 ```
+
+## Session Pack
+
+Sessions can be exported as a portable package and imported into a fresh isolated browser context. The package contains session metadata, action history, browser storage state, current page metadata, and the latest semantic snapshot when available.
+
+```ts
+const pack = await session.export();
+const restored = await client.importSession(pack);
+const restoredSnapshot = await restored.snapshot();
+const diagnostics = await restored.diagnostics();
+```
+
+REST endpoints:
+
+- `GET /api/v2/sessions/:id/export`
+- `POST /api/v2/sessions/import`
+- `GET /api/v2/sessions/:id/diagnostics`
 
 ## Plugin Registry and SAM
 

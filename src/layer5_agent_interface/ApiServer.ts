@@ -13,6 +13,8 @@ import { CommandRouter } from './CommandRouter';
 import { WebSocketGateway } from './WebSocketGateway';
 import { globalAuditLog } from '../common/AuditLog';
 import { createDefaultPluginRegistry } from '../plugins/PluginRegistry';
+import { Probe } from '../health/Probe';
+import { importedActions, importedSession, importedSnapshot, makePack, readPack } from '../session/Pack';
 
 export class ApiServer {
   private app = express();
@@ -31,6 +33,7 @@ export class ApiServer {
     this.semanticLayer,
     this.previousSnapshots
   );
+  private healthProbe = new Probe(this.browserCore, this.stateManager, this.pluginRegistry);
 
   constructor() {
     this.app.use(express.json({ limit: '8mb' }));
@@ -39,16 +42,7 @@ export class ApiServer {
 
   private setupRoutes() {
     this.app.get('/api/v2/health', (_req, res) => {
-      res.json({
-        status: 'ok',
-        version: '2.2.0',
-        plugins: this.pluginRegistry.listPlugins().map((plugin) => ({
-          name: plugin.name,
-          version: plugin.version,
-          status: plugin.status,
-        })),
-        metrics: globalMetrics.snapshot(),
-      });
+      res.json(this.healthProbe.report());
     });
 
     this.app.get('/metrics', (_req, res) => {
@@ -104,6 +98,110 @@ export class ApiServer {
         res.status(201).json({ session_id: sessionId });
       } catch (error: any) {
         this.sendRestError(res, normalizeError(error, { operation: 'create_session' }));
+      }
+    });
+
+    this.app.post('/api/v2/sessions/import', async (req, res) => {
+      let sessionId: string | undefined;
+      try {
+        const pack = readPack(req.body);
+        sessionId = String(req.body?.session_id ?? randomUUID());
+        if (this.stateManager.getSessionState(sessionId) || this.browserCore.hasSession(sessionId)) {
+          throw new LlmBrowserError('INVALID_PARAMS', 'Session ID already exists', { session_id: sessionId });
+        }
+
+        await this.browserCore.createSession(sessionId, { storageState: pack.browser.storage_state });
+        this.stateManager.registerSession(sessionId, importedSession(pack, sessionId));
+        this.stateManager.setActionHistory(sessionId, importedActions(pack, sessionId));
+        const snapshot = importedSnapshot(pack, sessionId);
+        if (snapshot) this.previousSnapshots.set(sessionId, snapshot);
+
+        const page = this.browserCore.getPage(sessionId);
+        await this.stateManager.injectMutationObserver(page, sessionId);
+        const targetUrl = String(req.body?.url ?? pack.page.url ?? pack.session.current_url ?? '');
+        if (targetUrl && req.body?.navigate !== false) {
+          await page.goto(targetUrl, { waitUntil: 'load' });
+          await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);
+          this.stateManager.recordPageState(sessionId, {
+            url: page.url(),
+            title: await page.title(),
+            snapshot_id: snapshot?.snapshot_id,
+          });
+        }
+
+        globalMetrics.increment('llm_browser_sessions_imported_total');
+        res.status(201).json({
+          session_id: sessionId,
+          imported_from_session_id: pack.session.session_id,
+          current_url: this.stateManager.getSessionState(sessionId)?.current_url,
+          actions_imported: pack.actions.length,
+          snapshot_imported: Boolean(snapshot),
+        });
+      } catch (error: any) {
+        if (sessionId) {
+          await this.browserCore.closeSession(sessionId).catch(() => undefined);
+          this.stateManager.closeSession(sessionId);
+          this.previousSnapshots.delete(sessionId);
+        }
+        this.sendRestError(res, normalizeError(error, { operation: 'import_session' }));
+      }
+    });
+
+    this.app.get('/api/v2/sessions/:id/export', async (req, res) => {
+      try {
+        const session = this.stateManager.getSessionState(req.params.id);
+        if (!session) {
+          return this.sendRestError(res, new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found'));
+        }
+        const page = this.browserCore.getPage(req.params.id);
+        const storageState = await this.browserCore.storageState(req.params.id);
+        const pack = makePack({
+          session: enrichSession(session, storageState, page.url()),
+          actions: this.stateManager.getActionHistory(req.params.id),
+          storageState,
+          page: {
+            url: page.url(),
+            title: await page.title(),
+          },
+          snapshot: this.previousSnapshots.get(req.params.id),
+        });
+        globalMetrics.increment('llm_browser_sessions_exported_total');
+        res.json(pack);
+      } catch (error) {
+        this.sendRestError(res, normalizeError(error, { operation: 'export_session' }));
+      }
+    });
+
+    this.app.get('/api/v2/sessions/:id/diagnostics', async (req, res) => {
+      try {
+        const session = this.stateManager.getSessionState(req.params.id);
+        if (!session) {
+          return this.sendRestError(res, new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found'));
+        }
+        const page = this.browserCore.getPage(req.params.id);
+        const snapshot = this.previousSnapshots.get(req.params.id);
+        res.json({
+          session,
+          page: {
+            url: page.url(),
+            title: await page.title(),
+          },
+          actions: {
+            total: this.stateManager.getActionHistory(req.params.id).length,
+            recent: this.stateManager.getActionHistory(req.params.id).slice(-10),
+          },
+          snapshot: snapshot
+            ? {
+                snapshot_id: snapshot.snapshot_id,
+                elements: snapshot.elements.length,
+                actions: snapshot.available_actions.length,
+                meta: snapshot.meta,
+              }
+            : undefined,
+          health: this.healthProbe.report(),
+        });
+      } catch (error) {
+        this.sendRestError(res, normalizeError(error, { operation: 'session_diagnostics' }));
       }
     });
 
@@ -290,4 +388,29 @@ function paginate<T>(items: T[], query: Record<string, any>, basePath: string) {
 
 function stringQuery(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+function enrichSession(session: any, storageState: any, pageUrl: string): any {
+  const localStorage = currentLocalStorage(storageState, pageUrl);
+  return {
+    ...session,
+    cookies: storageState.cookies ?? session.cookies ?? [],
+    localStorage: Object.keys(localStorage).length > 0 ? localStorage : session.localStorage ?? {},
+  };
+}
+
+function currentLocalStorage(storageState: any, pageUrl: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  let origin = '';
+  try {
+    origin = new URL(pageUrl).origin;
+  } catch {
+    return result;
+  }
+
+  const match = (storageState.origins ?? []).find((entry: any) => entry.origin === origin);
+  for (const entry of match?.localStorage ?? []) {
+    result[entry.name] = entry.value;
+  }
+  return result;
 }

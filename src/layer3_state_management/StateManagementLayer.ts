@@ -14,19 +14,19 @@ export class StateManagementLayer {
     globalEventBus.subscribe('action_completed', this.handleActionCompleted.bind(this));
   }
 
-  public registerSession(sessionId: string) {
+  public registerSession(sessionId: string, initial: Partial<SessionState> = {}) {
     const now = new Date().toISOString();
     this.sessions.set(sessionId, {
       session_id: sessionId,
-      created_at: now,
+      created_at: initial.created_at ?? now,
       updated_at: now,
       status: 'active',
-      current_url: '',
-      tabs: [{ tab_id: 'tab-1', url: '', title: '', active: true }],
-      cookies: [],
-      localStorage: {},
-      history: [],
-      configuration: {}
+      current_url: initial.current_url ?? '',
+      tabs: initial.tabs ?? [{ tab_id: 'tab-1', url: '', title: '', active: true }],
+      cookies: initial.cookies ?? [],
+      localStorage: initial.localStorage ?? {},
+      history: initial.history ?? [],
+      configuration: initial.configuration ?? {}
     });
     this.actionHistory.set(sessionId, []);
   }
@@ -95,6 +95,17 @@ export class StateManagementLayer {
     return Array.from(this.sessions.values());
   }
 
+  public updateSession(sessionId: string, patch: Partial<SessionState>): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.set(sessionId, {
+      ...session,
+      ...patch,
+      session_id: sessionId,
+      updated_at: new Date().toISOString(),
+    });
+  }
+
   public recordAction(record: ActionRecord): void {
     const history = this.actionHistory.get(record.session_id) ?? [];
     const existingIndex = history.findIndex((entry) => entry.action_id === record.action_id);
@@ -108,6 +119,15 @@ export class StateManagementLayer {
 
   public getActionHistory(sessionId: string): ActionRecord[] {
     return this.actionHistory.get(sessionId) ?? [];
+  }
+
+  public setActionHistory(sessionId: string, records: ActionRecord[]): void {
+    this.actionHistory.set(
+      sessionId,
+      records
+        .map((record) => ({ ...record, session_id: sessionId }))
+        .slice(-200)
+    );
   }
 
   public getAction(sessionId: string, actionId: string): ActionRecord | undefined {

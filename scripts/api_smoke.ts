@@ -22,6 +22,7 @@ async function main() {
   await server.start();
 
   let sessionId: string | undefined;
+  let importedSessionId: string | undefined;
   try {
     const baseUrl = `http://127.0.0.1:${port}`;
     const sessionResponse = await fetch(`${baseUrl}/api/v2/sessions`, { method: 'POST' });
@@ -189,6 +190,27 @@ async function main() {
 
     const wsSnapshot = await wsRpc(activeSessionId, 'snapshot', {});
 
+    const exportResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/export`);
+    assertOk(exportResponse, 'export session');
+    const sessionPack = await exportResponse.json();
+
+    const importResponse = await fetch(`${baseUrl}/api/v2/sessions/import`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ package: sessionPack }),
+    });
+    assertOk(importResponse, 'import session');
+    const imported = await importResponse.json();
+    importedSessionId = imported.session_id;
+
+    const importedSnapshotResponse = await fetch(`${baseUrl}/api/v2/sessions/${importedSessionId}/snapshot`);
+    assertOk(importedSnapshotResponse, 'imported snapshot');
+    const importedSnapshot = await importedSnapshotResponse.json();
+
+    const diagnosticsResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/diagnostics`);
+    assertOk(diagnosticsResponse, 'session diagnostics');
+    const diagnostics = await diagnosticsResponse.json();
+
     const snapshotResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/snapshot`);
     assertOk(snapshotResponse, 'snapshot');
     const snapshot = await snapshotResponse.json();
@@ -256,6 +278,20 @@ async function main() {
       },
       batch_results: batch.length,
       ws_snapshot_elements: wsSnapshot.result.snapshot.elements.length,
+      session_pack: {
+        version: sessionPack.version,
+        actions: sessionPack.actions.length,
+        snapshot: Boolean(sessionPack.snapshot),
+      },
+      imported_session: {
+        session_id: importedSessionId,
+        actions_imported: imported.actions_imported,
+        snapshot_elements: importedSnapshot.snapshot.elements.length,
+      },
+      diagnostics: {
+        health_score: diagnostics.health.health_score,
+        action_total: diagnostics.actions.total,
+      },
       rest_snapshot_elements: snapshot.snapshot.elements.length,
       recorded_actions: actions.pagination.total_count,
       audit_events: audit.pagination.total_count,
@@ -266,6 +302,9 @@ async function main() {
 
     console.log(JSON.stringify(report, null, 2));
   } finally {
+    if (importedSessionId) {
+      await fetch(`http://127.0.0.1:${port}/api/v2/sessions/${importedSessionId}`, { method: 'DELETE' }).catch(() => undefined);
+    }
     if (sessionId) {
       await fetch(`http://127.0.0.1:${port}/api/v2/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => undefined);
     }

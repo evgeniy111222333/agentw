@@ -23,6 +23,7 @@ async function main() {
 
   const client = new BrowserClient({ baseUrl: `http://127.0.0.1:${port}` });
   const session = await client.createSession();
+  let importedSession: any;
 
   try {
     const navigate = await session.navigate(`data:text/html;charset=utf-8,${encodeURIComponent(smokeHtml())}`);
@@ -57,6 +58,11 @@ async function main() {
     const socket = session.socket();
     const wsSnapshot = await socket.call('snapshot', { session_id: session.id });
     socket.close();
+
+    const sessionPack = await session.export();
+    importedSession = await client.importSession(sessionPack);
+    const importedSnapshot = await importedSession.snapshot();
+    const diagnostics = await session.diagnostics();
 
     const actions = await client.listActions(session.id);
     const audit = await client.getAudit(session.id);
@@ -93,6 +99,19 @@ async function main() {
             screenshot_file: screenshotFile.data?.file,
             pdf_file: pdf.data?.file,
           },
+          session_pack: {
+            version: sessionPack.version,
+            actions: sessionPack.actions.length,
+            snapshot: Boolean(sessionPack.snapshot),
+          },
+          imported_session: {
+            session_id: importedSession.id,
+            snapshot_elements: importedSnapshot.snapshot.elements.length,
+          },
+          diagnostics: {
+            health_score: diagnostics.health.health_score,
+            action_total: diagnostics.actions.total,
+          },
           ws_snapshot_elements: wsSnapshot.snapshot.elements.length,
           actions_recorded: actions.pagination.total_count,
           audit_events: audit.pagination.total_count,
@@ -104,6 +123,7 @@ async function main() {
       )
     );
   } finally {
+    await importedSession?.close().catch(() => undefined);
     await session.close().catch(() => undefined);
     await server.stop();
   }

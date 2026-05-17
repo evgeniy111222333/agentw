@@ -109,6 +109,34 @@ describe('BrowserClient SDK', () => {
     }));
   });
 
+  it('exports, imports, and reads diagnostics for sessions', async () => {
+    const pack = sessionPack();
+    const fetchImpl = jest.fn(async (url: string, init?: RequestInit) => {
+      if (url === 'http://example.test/api/v2/sessions/session-1/export') {
+        return jsonResponse(pack);
+      }
+      if (url === 'http://example.test/api/v2/sessions/import') {
+        expect(JSON.parse(String(init?.body))).toEqual({
+          session_id: 'session-2',
+          package: pack,
+        });
+        return jsonResponse({ session_id: 'session-2', imported_from_session_id: 'session-1', actions_imported: 0, snapshot_imported: true }, 201);
+      }
+      if (url === 'http://example.test/api/v2/sessions/session-2/diagnostics') {
+        return jsonResponse({ health: { status: 'ok' } });
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as any;
+
+    const client = new BrowserClient({ baseUrl: 'http://example.test', fetchImpl });
+    const exported = await client.exportSession('session-1');
+    const imported = await client.importSession(exported, { session_id: 'session-2' });
+    const diagnostics = await imported.diagnostics();
+
+    expect(imported.id).toBe('session-2');
+    expect(diagnostics.health.status).toBe('ok');
+  });
+
 
   it('throws typed API errors for non-retryable failures', async () => {
     const fetchImpl = jest.fn(async () =>
@@ -182,5 +210,33 @@ function pagination(total: number) {
       next: null,
       last: '/api/v2/plugins?page=1&limit=20',
     },
+  };
+}
+
+function sessionPack() {
+  return {
+    version: 'session-pack/1.0',
+    exported_at: '2026-05-18T00:00:00.000Z',
+    session: {
+      session_id: 'session-1',
+      created_at: '2026-05-18T00:00:00.000Z',
+      updated_at: '2026-05-18T00:00:00.000Z',
+      status: 'active',
+      current_url: 'https://example.test',
+      tabs: [],
+      cookies: [],
+      localStorage: {},
+      history: [],
+      configuration: {},
+    },
+    actions: [],
+    browser: {
+      storage_state: { cookies: [], origins: [] },
+    },
+    page: {
+      url: 'https://example.test',
+      title: 'Example',
+    },
+    snapshot: commandResult('snapshot').snapshot,
   };
 }
