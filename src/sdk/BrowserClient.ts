@@ -13,6 +13,7 @@ import {
   Pagination,
   PluginRuntimeInfo,
   SessionPack,
+  TraceRecord,
 } from './types';
 import { ActionRecord, SessionState } from '../common/types';
 
@@ -67,6 +68,16 @@ export class BrowserClient {
     const params = new URLSearchParams({ page: String(page), limit: String(limit) });
     if (sessionId) params.set('session_id', sessionId);
     return this.request(`/api/v2/ops?${params}`);
+  }
+
+  async listTraces(sessionId?: string, page = 1, limit = 20): Promise<Pagination<TraceRecord>> {
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (sessionId) params.set('session_id', sessionId);
+    return this.request(`/api/v2/traces?${params}`);
+  }
+
+  async getTrace(traceId: string): Promise<TraceRecord> {
+    return this.request(`/api/v2/traces/${encodeURIComponent(traceId)}`);
   }
 
   async getSession(sessionId: string): Promise<SessionState> {
@@ -230,6 +241,10 @@ export class BrowserSession {
 
   diagnostics(): Promise<Record<string, any>> {
     return this.client.getDiagnostics(this.id);
+  }
+
+  traces(page = 1, limit = 20): Promise<Pagination<TraceRecord>> {
+    return this.client.listTraces(this.id, page, limit);
   }
 
   navigate(url: string): Promise<CommandResult> {

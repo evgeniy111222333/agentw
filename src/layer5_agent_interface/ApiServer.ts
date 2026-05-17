@@ -15,6 +15,7 @@ import { globalAuditLog } from '../common/AuditLog';
 import { createDefaultPluginRegistry } from '../plugins/PluginRegistry';
 import { Probe } from '../health/Probe';
 import { importedActions, importedSession, importedSnapshot, makePack, readPack } from '../session/Pack';
+import { globalTraceStore } from '../trace/Trace';
 
 export class ApiServer {
   private app = express();
@@ -53,6 +54,20 @@ export class ApiServer {
       const session_id = stringQuery(req.query.session_id);
       const category = stringQuery(req.query.category) as any;
       res.json(paginate(globalAuditLog.list({ session_id, category }), req.query, '/api/v2/audit'));
+    });
+
+    this.app.get('/api/v2/traces', (req, res) => {
+      const session_id = stringQuery(req.query.session_id);
+      const status = stringQuery(req.query.status) as any;
+      res.json(paginate(globalTraceStore.list({ session_id, status }), req.query, '/api/v2/traces'));
+    });
+
+    this.app.get('/api/v2/traces/:traceId', (req, res) => {
+      const trace = globalTraceStore.get(req.params.traceId);
+      if (!trace) {
+        return this.sendRestError(res, new LlmBrowserError('ELEMENT_NOT_FOUND', 'Trace not found', { trace_id: req.params.traceId }));
+      }
+      res.json(trace);
     });
 
     this.app.get('/api/v2/plugins', (req, res) => {

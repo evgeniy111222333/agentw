@@ -9,6 +9,7 @@ import { LlmBrowserError, normalizeError } from '../common/errors';
 import { globalAuditLog, riskScoreForAction } from '../common/AuditLog';
 import { SecurityPolicy } from '../security/SecurityPolicy';
 import { OpStart, OpStatus, OpStore } from '../op/Op';
+import { globalTraceStore } from '../trace/Trace';
 
 export interface AgentCommand {
   action: string;
@@ -279,24 +280,40 @@ export class CommandRouter {
 
     let execution: ActionExecutionResult | undefined;
     let attempts = 0;
+    globalTraceStore.start({
+      trace_id: traceId,
+      session_id: command.session_id,
+      action,
+      target_id: command.target_id,
+    });
 
     try {
-      resolvedAction = preflight?.resolvedAction ?? this.validateCommand({ ...command, trace_id: traceId, action_params: params });
+      resolvedAction = preflight?.resolvedAction ?? this.traceSync(traceId, 'router.validate', { action }, () =>
+        this.validateCommand({ ...command, trace_id: traceId, action_params: params })
+      );
+      if (preflight?.resolvedAction) {
+        this.traceInstant(traceId, 'router.validate', { action, preflight: true });
+      }
+      const activeAction = resolvedAction;
       securityDecision = preflight?.securityDecision ?? {};
       if (!preflight?.skipSecurity) {
-        securityDecision = this.securityPolicy.authorize({
-          ...command,
-          action: resolvedAction.executionAction,
-          target_id: resolvedAction.targetId,
-          trace_id: traceId,
-          action_params: resolvedAction.params,
-        });
+        securityDecision = this.traceSync(traceId, 'security.authorize', { action: activeAction.executionAction }, () =>
+          this.securityPolicy.authorize({
+            ...command,
+            action: activeAction.executionAction,
+            target_id: activeAction.targetId,
+            trace_id: traceId,
+            action_params: activeAction.params,
+          })
+        );
+      } else {
+        this.traceInstant(traceId, 'security.authorize', { action: activeAction.executionAction, skipped: true });
       }
       this.recordAction({
         action_id: actionId,
         session_id: command.session_id,
         action,
-        target_id: command.target_id ?? resolvedAction.targetId,
+        target_id: command.target_id ?? activeAction.targetId,
         params,
         status: 'requested',
         requested_at: requestedAt,
@@ -305,23 +322,39 @@ export class CommandRouter {
 
       globalMetrics.increment('llm_browser_actions_total');
 
-      if (resolvedAction.executionAction !== 'snapshot') {
-        execution = await this.executeWithRetry(
-          command.session_id,
-          resolvedAction.executionAction,
-          resolvedAction.targetId,
-          resolvedAction.params
+      if (activeAction.executionAction !== 'snapshot') {
+        execution = await this.traceAsync(
+          traceId,
+          'action.execute',
+          {
+            action: activeAction.executionAction,
+            target_id: activeAction.targetId,
+          },
+          () => this.executeWithRetry(
+            command.session_id,
+            activeAction.executionAction,
+            activeAction.targetId,
+            activeAction.params
+          )
         );
       }
 
       const page = this.browserCore.getPage(command.session_id);
-      const snapshot = await this.semanticLayer.createSnapshot(page, {
-        previousSnapshot: this.previousSnapshots.get(command.session_id),
-        session: this.createSessionInfo(command.session_id),
-        actionTime: execution?.duration_ms ?? 0,
-        totalTime: Math.round(performance.now() - requestStart),
+      const previousSnapshot = this.previousSnapshots.get(command.session_id);
+      const snapshot = await this.traceAsync(
         traceId,
-      });
+        'semantic.extract',
+        {
+          previous_snapshot: Boolean(previousSnapshot),
+        },
+        () => this.semanticLayer.createSnapshot(page, {
+          previousSnapshot,
+          session: this.createSessionInfo(command.session_id),
+          actionTime: execution?.duration_ms ?? 0,
+          totalTime: Math.round(performance.now() - requestStart),
+          traceId,
+        })
+      );
 
       this.previousSnapshots.set(command.session_id, snapshot);
       this.stateManager.recordPageState(command.session_id, {
@@ -368,6 +401,8 @@ export class CommandRouter {
           attempts,
         },
       });
+      globalTraceStore.finish(traceId, 'success', totalTime);
+      globalMetrics.increment('llm_browser_traces_completed_total');
 
       return {
         status: 'success',
@@ -423,6 +458,11 @@ export class CommandRouter {
         message: normalized.message,
       });
       globalMetrics.increment('llm_browser_actions_failed_total');
+      globalTraceStore.finish(traceId, 'error', Math.round(performance.now() - requestStart), {
+        message: normalized.message,
+        code: normalized.code,
+      });
+      globalMetrics.increment('llm_browser_traces_failed_total');
       throw normalized;
     }
   }
@@ -590,6 +630,73 @@ export class CommandRouter {
   private recordAction(record: ActionRecord): void {
     this.stateManager.recordAction(record);
   }
+
+  private traceSync<T>(traceId: string, name: string, attributes: Record<string, any>, work: () => T): T {
+    const startedAt = new Date().toISOString();
+    const started = performance.now();
+    try {
+      const result = work();
+      globalTraceStore.addSpan(traceId, {
+        name,
+        started_at: startedAt,
+        duration_ms: Math.round(performance.now() - started),
+        status: 'ok',
+        attributes,
+      });
+      return result;
+    } catch (error: any) {
+      globalTraceStore.addSpan(traceId, {
+        name,
+        started_at: startedAt,
+        duration_ms: Math.round(performance.now() - started),
+        status: 'error',
+        attributes,
+        error: errorDetails(error),
+      });
+      throw error;
+    }
+  }
+
+  private async traceAsync<T>(
+    traceId: string,
+    name: string,
+    attributes: Record<string, any>,
+    work: () => Promise<T>
+  ): Promise<T> {
+    const startedAt = new Date().toISOString();
+    const started = performance.now();
+    try {
+      const result = await work();
+      globalTraceStore.addSpan(traceId, {
+        name,
+        started_at: startedAt,
+        duration_ms: Math.round(performance.now() - started),
+        status: 'ok',
+        attributes,
+      });
+      return result;
+    } catch (error: any) {
+      globalTraceStore.addSpan(traceId, {
+        name,
+        started_at: startedAt,
+        duration_ms: Math.round(performance.now() - started),
+        status: 'error',
+        attributes,
+        error: errorDetails(error),
+      });
+      throw error;
+    }
+  }
+
+  private traceInstant(traceId: string, name: string, attributes: Record<string, any>): void {
+    globalTraceStore.addSpan(traceId, {
+      name,
+      started_at: new Date().toISOString(),
+      duration_ms: 0,
+      status: 'ok',
+      attributes,
+    });
+  }
 }
 
 function stripRoutingParams(params: Record<string, any>): Record<string, any> {
@@ -619,6 +726,13 @@ function estimateMs(action: string, params: Record<string, any>): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorDetails(error: any): { message: string; code?: string } {
+  return {
+    message: error?.message ?? String(error),
+    code: error?.code,
+  };
 }
 
 function validateFsParams(params: Record<string, any>): void {

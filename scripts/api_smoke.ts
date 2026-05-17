@@ -211,6 +211,14 @@ async function main() {
     assertOk(diagnosticsResponse, 'session diagnostics');
     const diagnostics = await diagnosticsResponse.json();
 
+    const tracesResponse = await fetch(`${baseUrl}/api/v2/traces?session_id=${activeSessionId}`);
+    assertOk(tracesResponse, 'traces');
+    const traces = await tracesResponse.json();
+
+    const traceResponse = await fetch(`${baseUrl}/api/v2/traces/${navigate.metadata.trace_id}`);
+    assertOk(traceResponse, 'trace detail');
+    const trace = await traceResponse.json();
+
     const snapshotResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/snapshot`);
     assertOk(snapshotResponse, 'snapshot');
     const snapshot = await snapshotResponse.json();
@@ -291,6 +299,11 @@ async function main() {
       diagnostics: {
         health_score: diagnostics.health.health_score,
         action_total: diagnostics.actions.total,
+      },
+      traces: {
+        total: traces.pagination.total_count,
+        navigate_trace_status: trace.status,
+        navigate_spans: trace.spans.map((span: any) => span.name),
       },
       rest_snapshot_elements: snapshot.snapshot.elements.length,
       recorded_actions: actions.pagination.total_count,

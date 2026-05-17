@@ -94,6 +94,35 @@ export interface OpStatus {
   };
 }
 
+export interface TraceSpan {
+  span_id: string;
+  name: string;
+  started_at: string;
+  duration_ms: number;
+  status: 'ok' | 'error';
+  attributes?: Record<string, any>;
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
+export interface TraceRecord {
+  trace_id: string;
+  session_id: string;
+  action: string;
+  target_id?: string;
+  status: 'running' | 'success' | 'error';
+  started_at: string;
+  completed_at?: string;
+  duration_ms?: number;
+  spans: TraceSpan[];
+  error?: {
+    message: string;
+    code?: string;
+  };
+}
+
 export interface Pagination<T> {
   data: T[];
   pagination: {
@@ -180,6 +209,8 @@ export interface BrowserClientContract {
   importSession(pack: SessionPack, options?: ImportSessionOptions): Promise<BrowserSessionContract>;
   listPlugins(): Promise<Pagination<PluginRuntimeInfo>>;
   listOps(sessionId?: string): Promise<Pagination<OpStatus>>;
+  listTraces(sessionId?: string): Promise<Pagination<TraceRecord>>;
+  getTrace(traceId: string): Promise<TraceRecord>;
   getAudit(sessionId?: string): Promise<Pagination<any>>;
 }
 
@@ -188,6 +219,7 @@ export interface BrowserSessionContract {
   snapshot(): Promise<CommandResult>;
   export(): Promise<SessionPack>;
   diagnostics(): Promise<Record<string, any>>;
+  traces(): Promise<Pagination<TraceRecord>>;
   navigate(url: string): Promise<CommandResult>;
   click(targetId: string): Promise<CommandResult>;
   type(targetId: string, text: string, options?: Record<string, any>): Promise<CommandResult>;

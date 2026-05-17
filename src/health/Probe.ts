@@ -4,6 +4,7 @@ import { globalAuditLog } from '../common/AuditLog';
 import { globalMetrics } from '../common/MetricsRegistry';
 import { PluginRegistry } from '../plugins/PluginRegistry';
 import { ConfigurationManager } from '../config/ConfigurationManager';
+import { globalTraceStore } from '../trace/Trace';
 
 export class Probe {
   constructor(
@@ -24,6 +25,7 @@ export class Probe {
     const recentAudit = audit.slice(-100);
     const recentErrors = recentAudit.filter((event) => event.result !== 'success');
     const browser = this.browserCore.stats();
+    const traces = globalTraceStore.stats();
     const maxSessions = ConfigurationManager.getInstance().getConfig().server.max_sessions;
 
     const score = clamp01(
@@ -59,6 +61,7 @@ export class Probe {
           retained: audit.length,
           recent_errors: recentErrors.length,
         },
+        traces,
       },
       signals: {
         stale_sessions: staleSessions.map((session) => ({

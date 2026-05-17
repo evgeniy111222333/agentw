@@ -28,6 +28,7 @@ Default API:
 - `GET /api/v2/sessions/:id/export`
 - `GET /api/v2/sessions/:id/diagnostics`
 - `GET /api/v2/audit`
+- `GET /api/v2/traces`
 - `GET /api/v2/plugins`
 - `GET /api/v2/ops`
 - `GET /metrics`
@@ -85,6 +86,21 @@ REST endpoints:
 - `GET /api/v2/sessions/:id/export`
 - `POST /api/v2/sessions/import`
 - `GET /api/v2/sessions/:id/diagnostics`
+
+## Tracing
+
+Every command carries a `trace_id`. The runtime stores trace records with spans for router validation, security authorization, action execution, and semantic extraction.
+
+```ts
+const result = await session.click('submit');
+const trace = await client.getTrace(result.metadata.trace_id);
+const sessionTraces = await session.traces();
+```
+
+REST endpoints:
+
+- `GET /api/v2/traces`
+- `GET /api/v2/traces/:traceId`
 
 ## Plugin Registry and SAM
 

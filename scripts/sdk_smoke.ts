@@ -63,6 +63,8 @@ async function main() {
     importedSession = await client.importSession(sessionPack);
     const importedSnapshot = await importedSession.snapshot();
     const diagnostics = await session.diagnostics();
+    const traces = await session.traces();
+    const navigateTrace = await client.getTrace(navigate.metadata.trace_id);
 
     const actions = await client.listActions(session.id);
     const audit = await client.getAudit(session.id);
@@ -111,6 +113,11 @@ async function main() {
           diagnostics: {
             health_score: diagnostics.health.health_score,
             action_total: diagnostics.actions.total,
+          },
+          traces: {
+            total: traces.pagination.total_count,
+            navigate_trace_status: navigateTrace.status,
+            navigate_spans: navigateTrace.spans.map((span) => span.name),
           },
           ws_snapshot_elements: wsSnapshot.snapshot.elements.length,
           actions_recorded: actions.pagination.total_count,

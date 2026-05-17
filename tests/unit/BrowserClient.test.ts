@@ -125,6 +125,15 @@ describe('BrowserClient SDK', () => {
       if (url === 'http://example.test/api/v2/sessions/session-2/diagnostics') {
         return jsonResponse({ health: { status: 'ok' } });
       }
+      if (url === 'http://example.test/api/v2/traces?page=1&limit=20&session_id=session-2') {
+        return jsonResponse({
+          data: [traceRecord()],
+          pagination: pagination(1),
+        });
+      }
+      if (url === 'http://example.test/api/v2/traces/trace-1') {
+        return jsonResponse(traceRecord());
+      }
       throw new Error(`unexpected url ${url}`);
     }) as any;
 
@@ -132,9 +141,13 @@ describe('BrowserClient SDK', () => {
     const exported = await client.exportSession('session-1');
     const imported = await client.importSession(exported, { session_id: 'session-2' });
     const diagnostics = await imported.diagnostics();
+    const traces = await imported.traces();
+    const trace = await client.getTrace('trace-1');
 
     expect(imported.id).toBe('session-2');
     expect(diagnostics.health.status).toBe('ok');
+    expect(traces.data[0].trace_id).toBe('trace-1');
+    expect(trace.spans[0].name).toBe('semantic.extract');
   });
 
 
@@ -238,5 +251,26 @@ function sessionPack() {
       title: 'Example',
     },
     snapshot: commandResult('snapshot').snapshot,
+  };
+}
+
+function traceRecord() {
+  return {
+    trace_id: 'trace-1',
+    session_id: 'session-2',
+    action: 'snapshot',
+    status: 'success',
+    started_at: '2026-05-18T00:00:00.000Z',
+    completed_at: '2026-05-18T00:00:00.010Z',
+    duration_ms: 10,
+    spans: [
+      {
+        span_id: 'span-1',
+        name: 'semantic.extract',
+        started_at: '2026-05-18T00:00:00.000Z',
+        duration_ms: 10,
+        status: 'ok',
+      },
+    ],
   };
 }
