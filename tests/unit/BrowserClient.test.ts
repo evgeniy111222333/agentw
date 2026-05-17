@@ -215,6 +215,38 @@ describe('BrowserClient SDK', () => {
     });
   });
 
+  it('lists and clears runtime events through the SDK', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = jest.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url.endsWith('/api/v2/sessions')) {
+        return jsonResponse({ session_id: 'session-1' }, 201);
+      }
+      if (url === 'http://example.test/api/v2/sessions/session-1/events?kind=console&limit=5') {
+        return jsonResponse({
+          stats: {
+            total: 1,
+            by_kind: { request: 0, response: 0, request_failed: 0, console: 1, page_error: 0 },
+            recent_errors: 0,
+          },
+          events: [{ event_id: 'event-1', session_id: 'session-1', tab_id: 'tab-1', kind: 'console', timestamp: '2026-05-18T00:00:00.000Z', text: 'ready' }],
+        });
+      }
+      if (url === 'http://example.test/api/v2/sessions/session-1/events' && init?.method === 'DELETE') {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as any;
+
+    const client = new BrowserClient({ baseUrl: 'http://example.test', fetchImpl });
+    const session = await client.createSession();
+    const events = await session.events({ kind: 'console', limit: 5 });
+    await session.clearEvents();
+
+    expect(events.events[0]).toEqual(expect.objectContaining({ kind: 'console', text: 'ready' }));
+    expect(calls[2].init?.method).toBe('DELETE');
+  });
+
 
   it('throws typed API errors for non-retryable failures', async () => {
     const fetchImpl = jest.fn(async () =>

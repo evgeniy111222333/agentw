@@ -1,6 +1,7 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { ConfigurationManager } from '../config/ConfigurationManager';
-import { TabState } from '../common/types';
+import { RuntimeEvent, RuntimeEventKind, RuntimeEventStats, TabState } from '../common/types';
+import { Events } from '../obs/Events';
 
 export interface CreateSessionOptions {
   storageState?: any;
@@ -13,6 +14,7 @@ export class BrowserCore {
   private pages: Map<string, Map<string, Page>> = new Map();
   private activeTabs: Map<string, string> = new Map();
   private tabSeq: Map<string, number> = new Map();
+  private events = new Events();
 
   async initialize(): Promise<void> {
     const config = ConfigurationManager.getInstance().getConfig().browser;
@@ -57,6 +59,7 @@ export class BrowserCore {
       this.pages.delete(sessionId);
       this.activeTabs.delete(sessionId);
       this.tabSeq.delete(sessionId);
+      this.events.clear(sessionId);
     }
   }
 
@@ -92,7 +95,25 @@ export class BrowserCore {
       initialized: Boolean(this.browser),
       contexts: this.contexts.size,
       pages: Array.from(this.pages.values()).reduce((total, tabs) => total + tabs.size, 0),
+      events: this.events.stats().total,
     };
+  }
+
+  listEvents(
+    sessionId: string,
+    filter: { tab_id?: string; kind?: RuntimeEventKind; limit?: number } = {}
+  ): RuntimeEvent[] {
+    if (!this.contexts.has(sessionId)) throw new Error(`Session ${sessionId} not found`);
+    return this.events.list(sessionId, filter);
+  }
+
+  clearEvents(sessionId: string): void {
+    if (!this.contexts.has(sessionId)) throw new Error(`Session ${sessionId} not found`);
+    this.events.clear(sessionId);
+  }
+
+  eventStats(sessionId?: string): RuntimeEventStats {
+    return this.events.stats(sessionId);
   }
 
   async navigate(sessionId: string, url: string): Promise<void> {
@@ -176,6 +197,7 @@ export class BrowserCore {
 
     const tabId = preferredTabId ?? this.nextTabId(sessionId);
     tabs.set(tabId, page);
+    this.events.attach(sessionId, tabId, page);
     page.on('close', () => this.detachPage(sessionId, tabId));
     return tabId;
   }

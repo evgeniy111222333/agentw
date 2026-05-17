@@ -1,6 +1,7 @@
 import { ApiServer } from '../src/layer5_agent_interface/ApiServer';
 import { ConfigurationManager } from '../src/config/ConfigurationManager';
 import { BrowserClient } from '../src/sdk';
+import { createServer, Server } from 'http';
 
 const port = Number(process.env.LLM_BROWSER_SDK_SMOKE_PORT ?? 3227);
 
@@ -20,14 +21,16 @@ async function main() {
 
   const server = new ApiServer();
   await server.start();
+  const fixture = await startFixtureServer(port + 100);
+  const fixtureBaseUrl = `http://127.0.0.1:${port + 100}`;
 
   const client = new BrowserClient({ baseUrl: `http://127.0.0.1:${port}` });
   const session = await client.createSession();
   let importedSession: any;
 
   try {
-    const navigate = await session.navigate(`data:text/html;charset=utf-8,${encodeURIComponent(smokeHtml())}`);
-    const openedTab = await session.openTab(`data:text/html;charset=utf-8,${encodeURIComponent(tabHtml('SDK Tab'))}`);
+    const navigate = await session.navigate(`${fixtureBaseUrl}/page`);
+    const openedTab = await session.openTab(`${fixtureBaseUrl}/tab?title=${encodeURIComponent('SDK Tab')}`);
     const openedTabId = openedTab.data?.tab?.tab_id;
     if (!openedTabId) throw new Error('SDK openTab did not return tab_id');
     const tabsOpen = await session.tabs();
@@ -72,6 +75,8 @@ async function main() {
     const importedSnapshot = await importedSession.snapshot();
     const diagnostics = await session.diagnostics();
     const auth = await session.auth();
+    const events = await session.events({ limit: 50 });
+    const consoleEvents = await session.events({ kind: 'console', limit: 10 });
     const traces = await session.traces();
     const navigateTrace = await client.getTrace(navigate.metadata.trace_id);
     const cacheProbeOne = await session.snapshot();
@@ -141,6 +146,7 @@ async function main() {
           diagnostics: {
             health_score: diagnostics.health.health_score,
             action_total: diagnostics.actions.total,
+            events_total: diagnostics.events.stats.total,
             auth: {
               authenticated: diagnostics.session.auth?.authenticated,
               method: diagnostics.session.auth?.method,
@@ -165,6 +171,14 @@ async function main() {
             probe_two: cacheProbeTwo.snapshot.meta?.cache_status,
             invalidated: invalidated.data?.invalidated,
           },
+          events: {
+            total: events.stats.total,
+            by_kind: events.stats.by_kind,
+            recent_errors: events.stats.recent_errors,
+            console_count: consoleEvents.events.length,
+            redacted: JSON.stringify(events.events).includes('%5Bredacted%5D') || JSON.stringify(events.events).includes('[redacted]'),
+            recent_console: consoleEvents.events.slice(-3).map((event) => ({ level: event.level, text: event.text })),
+          },
           ws_snapshot_elements: wsSnapshot.snapshot.elements.length,
           actions_recorded: actions.pagination.total_count,
           audit_events: audit.pagination.total_count,
@@ -179,6 +193,7 @@ async function main() {
     await importedSession?.close().catch(() => undefined);
     await session.close().catch(() => undefined);
     await server.stop();
+    await closeServer(fixture);
   }
 }
 
@@ -203,7 +218,7 @@ function summarize(result: any) {
   };
 }
 
-function smokeHtml(): string {
+function smokeHtml(baseUrl: string): string {
   return `<!doctype html>
 <html>
   <head><title>SDK Smoke</title></head>
@@ -225,9 +240,45 @@ function smokeHtml(): string {
       <input id="file-input" type="file" onchange="document.getElementById('file-status').textContent = this.files[0].name + ':' + this.files[0].size">
       <p id="file-status">empty</p>
       <a id="download-link" download="report.txt" href="data:text/plain;base64,c2RrLXJlcG9ydA==">Download report</a>
+      <script>
+        console.log('sdk smoke console ready');
+        console.error('sdk smoke console error');
+        fetch('${baseUrl}/probe?token=sdk-secret').then(() => console.log('sdk smoke probe done'));
+        fetch('data:application/json,%7B%22ok%22%3Atrue%7D').then(() => console.log('sdk smoke fetch done'));
+      </script>
     </main>
   </body>
 </html>`;
+}
+
+async function startFixtureServer(port: number): Promise<Server> {
+  const server = createServer((req, res) => {
+    const requestUrl = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
+    if (requestUrl.pathname === '/page') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(smokeHtml(`http://127.0.0.1:${port}`));
+      return;
+    }
+    if (requestUrl.pathname === '/tab') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(tabHtml(requestUrl.searchParams.get('title') ?? 'SDK Tab'));
+      return;
+    }
+    if (requestUrl.pathname === '/probe') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
+  });
+
+  await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+  return server;
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
 function tabHtml(title: string): string {
@@ -238,6 +289,7 @@ function tabHtml(title: string): string {
     <main>
       <h1>${title}</h1>
       <p>Second tab content</p>
+      <script>console.log('${title} console ready')</script>
     </main>
   </body>
 </html>`;

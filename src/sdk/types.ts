@@ -3,6 +3,9 @@ import {
   ActionParam,
   AuthState,
   AvailableAction,
+  RuntimeEvent,
+  RuntimeEventKind,
+  RuntimeEventStats,
   SemanticSnapshot,
   SessionState,
   TabState,
@@ -152,6 +155,11 @@ export interface SemanticCacheInfo {
   }>;
 }
 
+export interface RuntimeEventInfo {
+  stats: RuntimeEventStats;
+  events: RuntimeEvent[];
+}
+
 export interface Pagination<T> {
   data: T[];
   pagination: {
@@ -244,6 +252,8 @@ export interface BrowserClientContract {
   clearSemanticCache(): Promise<void>;
   getAuth(sessionId: string): Promise<AuthState>;
   listTabs(sessionId: string): Promise<TabState[]>;
+  listEvents(sessionId: string, options?: { tab_id?: string; kind?: RuntimeEventKind; limit?: number }): Promise<RuntimeEventInfo>;
+  clearEvents(sessionId: string): Promise<void>;
   getAudit(sessionId?: string): Promise<Pagination<any>>;
 }
 
@@ -254,6 +264,8 @@ export interface BrowserSessionContract {
   diagnostics(): Promise<Record<string, any>>;
   auth(): Promise<AuthState>;
   tabs(): Promise<TabState[]>;
+  events(options?: { tab_id?: string; kind?: RuntimeEventKind; limit?: number }): Promise<RuntimeEventInfo>;
+  clearEvents(): Promise<void>;
   traces(): Promise<Pagination<TraceRecord>>;
   navigate(url: string): Promise<CommandResult>;
   openTab(url?: string): Promise<CommandResult>;
@@ -277,4 +289,14 @@ export interface BrowserSessionContract {
   close(): Promise<void>;
 }
 
-export type { ActionRecord, AuthState, AvailableAction, SemanticSnapshot, SessionState, TabState };
+export type {
+  ActionRecord,
+  AuthState,
+  AvailableAction,
+  RuntimeEvent,
+  RuntimeEventKind,
+  RuntimeEventStats,
+  SemanticSnapshot,
+  SessionState,
+  TabState,
+};

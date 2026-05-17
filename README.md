@@ -32,6 +32,8 @@ Default API:
 - `POST /api/v2/sessions/:id/tabs`
 - `POST /api/v2/sessions/:id/tabs/:tabId/switch`
 - `DELETE /api/v2/sessions/:id/tabs/:tabId`
+- `GET /api/v2/sessions/:id/events`
+- `DELETE /api/v2/sessions/:id/events`
 - `GET /api/v2/audit`
 - `GET /api/v2/traces`
 - `GET /api/v2/cache/semantic`
@@ -91,6 +93,20 @@ REST endpoints:
 - `POST /api/v2/sessions/:id/tabs`
 - `POST /api/v2/sessions/:id/tabs/:tabId/switch`
 - `DELETE /api/v2/sessions/:id/tabs/:tabId`
+
+## Events
+
+Each page records a bounded stream of runtime events: network requests, responses, request failures, console messages, and page errors. Event URLs redact sensitive query values such as tokens, secrets, passwords, auth codes, and session IDs. Request/response bodies and headers are not emitted.
+
+```ts
+const events = await session.events({ kind: 'console', limit: 20 });
+await session.clearEvents();
+```
+
+REST endpoints:
+
+- `GET /api/v2/sessions/:id/events`
+- `DELETE /api/v2/sessions/:id/events`
 
 ## File Actions
 

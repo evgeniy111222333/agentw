@@ -104,6 +104,10 @@ async function measureTabs() {
     const closed = await core.closeTab(sessionId, opened.tab_id);
     const closeMs = Math.round(performance.now() - closeStarted);
     const tabsFinal = await core.listTabs(sessionId);
+    const eventsStarted = performance.now();
+    const events = core.listEvents(sessionId, { limit: 50 });
+    const eventsMs = Math.round(performance.now() - eventsStarted);
+    const eventStats = core.eventStats(sessionId);
 
     return {
       open_ms: openMs,
@@ -115,6 +119,10 @@ async function measureTabs() {
       switched_to: switched.tab_id,
       closed: closed.closed_tab_id,
       final_count: tabsFinal.length,
+      events_ms: eventsMs,
+      events_total: eventStats.total,
+      events_by_kind: eventStats.by_kind,
+      recent_console: events.filter((event) => event.kind === 'console').slice(-3).map((event) => event.text),
     };
   } finally {
     await core.close();
@@ -192,7 +200,13 @@ function tabHtml(title: string): string {
   return `<!doctype html>
 <html>
   <head><title>${title}</title></head>
-  <body><main><h1>${title}</h1></main></body>
+  <body>
+    <main><h1>${title}</h1></main>
+    <script>
+      console.log('${title} console ready');
+      fetch('data:application/json,%7B%22ok%22%3Atrue%7D').then(() => console.log('${title} fetch done'));
+    </script>
+  </body>
 </html>`;
 }
 

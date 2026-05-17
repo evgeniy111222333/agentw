@@ -221,6 +221,10 @@ export class ApiServer {
             total: this.stateManager.getActionHistory(req.params.id).length,
             recent: this.stateManager.getActionHistory(req.params.id).slice(-10),
           },
+          events: {
+            stats: this.browserCore.eventStats(req.params.id),
+            recent: this.browserCore.listEvents(req.params.id, { limit: 10 }),
+          },
           snapshot: snapshot
             ? {
                 snapshot_id: snapshot.snapshot_id,
@@ -246,6 +250,39 @@ export class ApiServer {
         res.json(result);
       } catch (error) {
         this.sendRestError(res, normalizeError(error));
+      }
+    });
+
+    this.app.get('/api/v2/sessions/:id/events', (req, res) => {
+      try {
+        const session = this.stateManager.getSessionState(req.params.id);
+        if (!session) {
+          return this.sendRestError(res, new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found'));
+        }
+        res.json({
+          stats: this.browserCore.eventStats(req.params.id),
+          events: this.browserCore.listEvents(req.params.id, {
+            tab_id: stringQuery(req.query.tab_id),
+            kind: stringQuery(req.query.kind) as any,
+            limit: Number(req.query.limit ?? 100),
+          }),
+        });
+      } catch (error) {
+        this.sendRestError(res, normalizeError(error, { operation: 'session_events' }));
+      }
+    });
+
+    this.app.delete('/api/v2/sessions/:id/events', (req, res) => {
+      try {
+        const session = this.stateManager.getSessionState(req.params.id);
+        if (!session) {
+          return this.sendRestError(res, new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found'));
+        }
+        this.browserCore.clearEvents(req.params.id);
+        globalMetrics.increment('llm_browser_events_cleared_total');
+        res.status(204).send();
+      } catch (error) {
+        this.sendRestError(res, normalizeError(error, { operation: 'clear_session_events' }));
       }
     });
 

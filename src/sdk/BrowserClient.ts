@@ -12,11 +12,12 @@ import {
   OpStatus,
   Pagination,
   PluginRuntimeInfo,
+  RuntimeEventInfo,
   SessionPack,
   SemanticCacheInfo,
   TraceRecord,
 } from './types';
-import { ActionRecord, AuthState, SessionState, TabState } from '../common/types';
+import { ActionRecord, AuthState, RuntimeEventKind, SessionState, TabState } from '../common/types';
 
 type JsonValue = Record<string, any>;
 
@@ -107,6 +108,25 @@ export class BrowserClient {
   async listTabs(sessionId: string): Promise<TabState[]> {
     const response = await this.request<{ tabs: TabState[] }>(`/api/v2/sessions/${encodeURIComponent(sessionId)}/tabs`);
     return response.tabs;
+  }
+
+  async listEvents(
+    sessionId: string,
+    options: { tab_id?: string; kind?: RuntimeEventKind; limit?: number } = {}
+  ): Promise<RuntimeEventInfo> {
+    const params = new URLSearchParams();
+    if (options.tab_id) params.set('tab_id', options.tab_id);
+    if (options.kind) params.set('kind', options.kind);
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    const suffix = params.size > 0 ? `?${params}` : '';
+    return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/events${suffix}`);
+  }
+
+  async clearEvents(sessionId: string): Promise<void> {
+    await this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/events`, {
+      method: 'DELETE',
+      expectJson: false,
+    });
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -278,6 +298,14 @@ export class BrowserSession {
 
   tabs(): Promise<TabState[]> {
     return this.client.listTabs(this.id);
+  }
+
+  events(options: { tab_id?: string; kind?: RuntimeEventKind; limit?: number } = {}): Promise<RuntimeEventInfo> {
+    return this.client.listEvents(this.id, options);
+  }
+
+  clearEvents(): Promise<void> {
+    return this.client.clearEvents(this.id);
   }
 
   openTab(url?: string): Promise<CommandResult> {

@@ -1,6 +1,7 @@
 import { ApiServer } from '../src/layer5_agent_interface/ApiServer';
 import { ConfigurationManager } from '../src/config/ConfigurationManager';
 import { WebSocket } from 'ws';
+import { createServer, Server } from 'http';
 
 const port = Number(process.env.LLM_BROWSER_SMOKE_PORT ?? 3217);
 
@@ -20,6 +21,8 @@ async function main() {
 
   const server = new ApiServer();
   await server.start();
+  const fixture = await startFixtureServer(port + 100);
+  const fixtureBaseUrl = `http://127.0.0.1:${port + 100}`;
 
   let sessionId: string | undefined;
   let importedSessionId: string | undefined;
@@ -34,7 +37,7 @@ async function main() {
     const navigate = await rpc(baseUrl, 'navigate', {
       session_id: activeSessionId,
       action_params: {
-        url: `data:text/html;charset=utf-8,${encodeURIComponent(smokeHtml())}`,
+        url: `${fixtureBaseUrl}/page`,
       },
     });
 
@@ -42,7 +45,7 @@ async function main() {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        url: `data:text/html;charset=utf-8,${encodeURIComponent(tabHtml('API Tab'))}`,
+        url: `${fixtureBaseUrl}/tab?title=${encodeURIComponent('API Tab')}`,
       }),
     });
     assertOk(openTabResponse, 'open tab');
@@ -286,6 +289,14 @@ async function main() {
     assertOk(healthResponse, 'health');
     const health = await healthResponse.json();
 
+    const eventsResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/events?limit=50`);
+    assertOk(eventsResponse, 'runtime events');
+    const events = await eventsResponse.json();
+
+    const consoleEventsResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/events?kind=console&limit=10`);
+    assertOk(consoleEventsResponse, 'console events');
+    const consoleEvents = await consoleEventsResponse.json();
+
     const report = {
       session_id: activeSessionId,
       navigate: summarizeRpc(navigate),
@@ -357,6 +368,7 @@ async function main() {
       diagnostics: {
         health_score: diagnostics.health.health_score,
         action_total: diagnostics.actions.total,
+        events_total: diagnostics.events.stats.total,
         auth: {
           authenticated: diagnostics.session.auth?.authenticated,
           method: diagnostics.session.auth?.method,
@@ -380,6 +392,14 @@ async function main() {
         probe_one: cacheProbeOne.snapshot.meta?.cache_status,
         probe_two: cacheProbeTwo.snapshot.meta?.cache_status,
       },
+      events: {
+        total: events.stats.total,
+        by_kind: events.stats.by_kind,
+        recent_errors: events.stats.recent_errors,
+        console_count: consoleEvents.events.length,
+        redacted: JSON.stringify(events.events).includes('%5Bredacted%5D') || JSON.stringify(events.events).includes('[redacted]'),
+        recent_console: consoleEvents.events.slice(-3).map((event: any) => ({ level: event.level, text: event.text })),
+      },
       rest_snapshot_elements: snapshot.snapshot.elements.length,
       recorded_actions: actions.pagination.total_count,
       audit_events: audit.pagination.total_count,
@@ -397,6 +417,7 @@ async function main() {
       await fetch(`http://127.0.0.1:${port}/api/v2/sessions/${sessionId}`, { method: 'DELETE' }).catch(() => undefined);
     }
     await server.stop();
+    await closeServer(fixture);
   }
 }
 
@@ -523,7 +544,7 @@ function summarizeRpc(result: any) {
   };
 }
 
-function smokeHtml(): string {
+function smokeHtml(baseUrl: string): string {
   return `<!doctype html>
 <html>
   <head><title>API Smoke</title></head>
@@ -551,9 +572,45 @@ function smokeHtml(): string {
       <script type="application/llm-actions+json">
         {"actions":[{"action":"checkout","label":"Checkout via SAM","selector":"#add-button","execution":{"action":"click"}}]}
       </script>
+      <script>
+        console.log('api smoke console ready');
+        console.error('api smoke console error');
+        fetch('${baseUrl}/probe?token=api-secret').then(() => console.log('api smoke probe done'));
+        fetch('data:application/json,%7B%22ok%22%3Atrue%7D').then(() => console.log('api smoke fetch done'));
+      </script>
     </main>
   </body>
 </html>`;
+}
+
+async function startFixtureServer(port: number): Promise<Server> {
+  const server = createServer((req, res) => {
+    const requestUrl = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
+    if (requestUrl.pathname === '/page') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(smokeHtml(`http://127.0.0.1:${port}`));
+      return;
+    }
+    if (requestUrl.pathname === '/tab') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(tabHtml(requestUrl.searchParams.get('title') ?? 'API Tab'));
+      return;
+    }
+    if (requestUrl.pathname === '/probe') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
+  });
+
+  await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+  return server;
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
 function tabHtml(title: string): string {
@@ -564,6 +621,7 @@ function tabHtml(title: string): string {
     <main>
       <h1>${title}</h1>
       <p>Second tab content</p>
+      <script>console.log('${title} console ready')</script>
     </main>
   </body>
 </html>`;

@@ -162,6 +162,38 @@ export interface AuthState {
   updated_at: string;
 }
 
+export type RuntimeEventKind = 'request' | 'response' | 'request_failed' | 'console' | 'page_error';
+
+export interface RuntimeEvent {
+  event_id: string;
+  session_id: string;
+  tab_id: string;
+  kind: RuntimeEventKind;
+  timestamp: string;
+  url?: string;
+  method?: string;
+  resource_type?: string;
+  request_id?: string;
+  status?: number;
+  status_text?: string;
+  ok?: boolean;
+  duration_ms?: number;
+  level?: string;
+  text?: string;
+  location?: {
+    url?: string;
+    line?: number;
+    column?: number;
+  };
+  error?: string;
+}
+
+export interface RuntimeEventStats {
+  total: number;
+  by_kind: Record<RuntimeEventKind, number>;
+  recent_errors: number;
+}
+
 export interface SessionState {
   session_id: string;
   created_at: string;

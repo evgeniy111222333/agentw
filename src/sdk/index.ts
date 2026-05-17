@@ -9,5 +9,9 @@ export type {
   ExecuteActionOptions,
   Pagination,
   AuthState,
+  RuntimeEvent,
+  RuntimeEventInfo,
+  RuntimeEventKind,
+  RuntimeEventStats,
   TabState,
 } from './types';
