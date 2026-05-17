@@ -1,6 +1,6 @@
 import { Page } from 'playwright';
 import { globalEventBus } from '../common/EventBus';
-import { ActionRecord, SessionState } from '../common/types';
+import { ActionRecord, SessionState, TabState } from '../common/types';
 
 export class StateManagementLayer {
   private sessions: Map<string, SessionState> = new Map();
@@ -63,6 +63,7 @@ export class StateManagementLayer {
 
     const now = new Date().toISOString();
     const activeTab = session.tabs.find((tab) => tab.active) ?? session.tabs[0];
+    if (!activeTab) return;
     activeTab.url = pageState.url;
     activeTab.title = pageState.title;
     activeTab.snapshot_id = pageState.snapshot_id;
@@ -79,6 +80,29 @@ export class StateManagementLayer {
 
     session.current_url = pageState.url;
     session.updated_at = now;
+    this.sessions.set(sessionId, session);
+  }
+
+  public syncTabs(sessionId: string, tabs: TabState[]): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    const previous = new Map(session.tabs.map((tab) => [tab.tab_id, tab]));
+    const normalized = tabs.map((tab, index) => {
+      const old = previous.get(tab.tab_id);
+      return {
+        ...tab,
+        active: index === 0 ? Boolean(tab.active || !tabs.some((candidate) => candidate.active)) : Boolean(tab.active),
+        snapshot_id: old?.snapshot_id,
+        form_states: old?.form_states,
+      };
+    });
+    if (!normalized.some((tab) => tab.active) && normalized[0]) normalized[0].active = true;
+
+    const activeTab = normalized.find((tab) => tab.active) ?? normalized[0];
+    session.tabs = normalized;
+    session.current_url = activeTab?.url ?? session.current_url;
+    session.updated_at = new Date().toISOString();
     this.sessions.set(sessionId, session);
   }
 

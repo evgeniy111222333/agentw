@@ -34,6 +34,26 @@ describe('SecurityPolicy', () => {
     ).toThrow(expect.objectContaining({ code: 'SECURITY_VIOLATION' }));
   });
 
+  it('applies navigation domain policy to new tabs', () => {
+    const state = new StateManagementLayer();
+    state.registerSession('session');
+    const policy = new SecurityPolicy(state);
+    configManager.updateConfig({
+      security: {
+        ...originalSecurity,
+        domain_blacklist: ['blocked.test'],
+      },
+    });
+
+    expect(() =>
+      policy.authorize({
+        action: 'open_tab',
+        session_id: 'session',
+        action_params: { url: 'https://blocked.test/path' },
+      })
+    ).toThrow(expect.objectContaining({ code: 'SECURITY_VIOLATION' }));
+  });
+
   it('enforces per-session token bucket limits', () => {
     const state = new StateManagementLayer();
     state.registerSession('session');

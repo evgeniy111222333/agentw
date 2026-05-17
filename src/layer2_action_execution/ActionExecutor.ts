@@ -70,6 +70,28 @@ export class ActionExecutor {
         await page.waitForLoadState('networkidle', { timeout: params.timeout_ms ?? 5000 }).catch(() => undefined);
         return { url: page.url() };
 
+      case 'open_tab':
+      case 'new_tab': {
+        const tab = await this.browserCore.openTab(sessionId, params.url ? String(params.url) : undefined);
+        return { tab, tabs: await this.browserCore.listTabs(sessionId) };
+      }
+
+      case 'switch_tab': {
+        const tabId = String(params.tab_id ?? targetId ?? '');
+        if (!tabId) throw new Error('tab_id is required for switch_tab');
+        const tab = await this.browserCore.switchTab(sessionId, tabId);
+        return { tab, tabs: await this.browserCore.listTabs(sessionId) };
+      }
+
+      case 'close_tab': {
+        const tabId = params.tab_id ?? targetId;
+        const result = await this.browserCore.closeTab(sessionId, tabId ? String(tabId) : undefined);
+        return { ...result, tabs: await this.browserCore.listTabs(sessionId) };
+      }
+
+      case 'list_tabs':
+        return { tabs: await this.browserCore.listTabs(sessionId) };
+
       case 'click': {
         const locator = await this.resolveActionableLocator(page, targetId, action);
         await locator.click({ timeout: params.timeout_ms ?? 5000 });

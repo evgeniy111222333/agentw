@@ -172,6 +172,49 @@ describe('BrowserClient SDK', () => {
     expect(cache.stats.entries).toBe(1);
   });
 
+  it('lists and controls tabs through the SDK', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl = jest.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url.endsWith('/api/v2/sessions')) {
+        return jsonResponse({ session_id: 'session-1' }, 201);
+      }
+      if (url === 'http://example.test/api/v2/sessions/session-1/tabs') {
+        return jsonResponse({
+          tabs: [
+            { tab_id: 'tab-1', url: 'https://example.test/one', title: 'One', active: true },
+            { tab_id: 'tab-2', url: 'https://example.test/two', title: 'Two', active: false },
+          ],
+        });
+      }
+      if (url.endsWith('/api/v2/sessions/session-1/actions')) {
+        return jsonResponse(commandResult(JSON.parse(String(init?.body)).action));
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as any;
+
+    const client = new BrowserClient({ baseUrl: 'http://example.test', fetchImpl });
+    const session = await client.createSession();
+    const tabs = await session.tabs();
+    await session.openTab('https://example.test/two');
+    await session.switchTab('tab-2');
+    await session.closeTab('tab-2');
+
+    expect(tabs).toHaveLength(2);
+    expect(JSON.parse(String(calls[2].init?.body))).toEqual({
+      action: 'open_tab',
+      params: { url: 'https://example.test/two' },
+    });
+    expect(JSON.parse(String(calls[3].init?.body))).toEqual({
+      action: 'switch_tab',
+      params: { tab_id: 'tab-2' },
+    });
+    expect(JSON.parse(String(calls[4].init?.body))).toEqual({
+      action: 'close_tab',
+      params: { tab_id: 'tab-2' },
+    });
+  });
+
 
   it('throws typed API errors for non-retryable failures', async () => {
     const fetchImpl = jest.fn(async () =>

@@ -16,7 +16,7 @@ import {
   SemanticCacheInfo,
   TraceRecord,
 } from './types';
-import { ActionRecord, AuthState, SessionState } from '../common/types';
+import { ActionRecord, AuthState, SessionState, TabState } from '../common/types';
 
 type JsonValue = Record<string, any>;
 
@@ -102,6 +102,11 @@ export class BrowserClient {
 
   async getAuth(sessionId: string): Promise<AuthState> {
     return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/auth`);
+  }
+
+  async listTabs(sessionId: string): Promise<TabState[]> {
+    const response = await this.request<{ tabs: TabState[] }>(`/api/v2/sessions/${encodeURIComponent(sessionId)}/tabs`);
+    return response.tabs;
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -269,6 +274,22 @@ export class BrowserSession {
 
   navigate(url: string): Promise<CommandResult> {
     return this.client.executeAction(this.id, 'navigate', { params: { url } });
+  }
+
+  tabs(): Promise<TabState[]> {
+    return this.client.listTabs(this.id);
+  }
+
+  openTab(url?: string): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'open_tab', { params: url ? { url } : {} });
+  }
+
+  switchTab(tabId: string): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'switch_tab', { params: { tab_id: tabId } });
+  }
+
+  closeTab(tabId?: string): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'close_tab', { params: tabId ? { tab_id: tabId } : {} });
   }
 
   click(targetId: string): Promise<CommandResult> {

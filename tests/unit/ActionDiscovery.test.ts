@@ -59,6 +59,14 @@ describe('ActionDiscovery', () => {
     }));
 
     expect(actions).toContainEqual(expect.objectContaining({
+      action: 'open_tab'
+    }));
+
+    expect(actions).toContainEqual(expect.objectContaining({
+      action: 'list_tabs'
+    }));
+
+    expect(actions).toContainEqual(expect.objectContaining({
       action: 'invalidate_cache'
     }));
   });

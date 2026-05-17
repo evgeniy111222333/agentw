@@ -28,6 +28,10 @@ Default API:
 - `GET /api/v2/sessions/:id/export`
 - `GET /api/v2/sessions/:id/diagnostics`
 - `GET /api/v2/sessions/:id/auth`
+- `GET /api/v2/sessions/:id/tabs`
+- `POST /api/v2/sessions/:id/tabs`
+- `POST /api/v2/sessions/:id/tabs/:tabId/switch`
+- `DELETE /api/v2/sessions/:id/tabs/:tabId`
 - `GET /api/v2/audit`
 - `GET /api/v2/traces`
 - `GET /api/v2/cache/semantic`
@@ -69,6 +73,24 @@ if (auth.authenticated) {
 REST endpoint:
 
 - `GET /api/v2/sessions/:id/auth`
+
+## Tabs
+
+Sessions can hold multiple isolated pages in one browser context. The active tab is reflected in `snapshot.session.tab_id`, and deltas are tracked per tab so snapshots from different tabs are not compared to each other.
+
+```ts
+const second = await session.openTab('https://example.com/docs');
+await session.switchTab('tab-1');
+const tabs = await session.tabs();
+await session.closeTab(second.data?.tab.tab_id);
+```
+
+REST endpoints:
+
+- `GET /api/v2/sessions/:id/tabs`
+- `POST /api/v2/sessions/:id/tabs`
+- `POST /api/v2/sessions/:id/tabs/:tabId/switch`
+- `DELETE /api/v2/sessions/:id/tabs/:tabId`
 
 ## File Actions
 

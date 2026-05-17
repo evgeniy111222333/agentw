@@ -112,6 +112,19 @@ export class ActionDiscovery {
         risk: 'low',
       },
       {
+        action_id: 'open_tab',
+        action: 'open_tab',
+        label: 'Open new tab',
+        params: { schema: { url: 'string?' } },
+        risk: 'low',
+      },
+      {
+        action_id: 'list_tabs',
+        action: 'list_tabs',
+        label: 'List tabs',
+        risk: 'low',
+      },
+      {
         action_id: 'scroll_down',
         action: 'scroll',
         label: 'Scroll down',

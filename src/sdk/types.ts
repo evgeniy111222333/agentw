@@ -5,6 +5,7 @@ import {
   AvailableAction,
   SemanticSnapshot,
   SessionState,
+  TabState,
 } from '../common/types';
 
 export type BrowserAction =
@@ -18,6 +19,8 @@ export type BrowserAction =
   | 'loop'
   | 'multi_click'
   | 'navigate'
+  | 'new_tab'
+  | 'open_tab'
   | 'parallel'
   | 'poll'
   | 'refresh'
@@ -29,6 +32,7 @@ export type BrowserAction =
   | 'sequence'
   | 'snapshot'
   | 'submit'
+  | 'switch_tab'
   | 'type'
   | 'wait'
   | 'wait_for'
@@ -40,6 +44,8 @@ export type BrowserAction =
   | 'pdf_generate'
   | 'screenshot_file'
   | 'screenshot_to_file'
+  | 'list_tabs'
+  | 'close_tab'
   | 'upload';
 
 export interface CommandResult {
@@ -237,6 +243,7 @@ export interface BrowserClientContract {
   getSemanticCache(): Promise<SemanticCacheInfo>;
   clearSemanticCache(): Promise<void>;
   getAuth(sessionId: string): Promise<AuthState>;
+  listTabs(sessionId: string): Promise<TabState[]>;
   getAudit(sessionId?: string): Promise<Pagination<any>>;
 }
 
@@ -246,8 +253,12 @@ export interface BrowserSessionContract {
   export(): Promise<SessionPack>;
   diagnostics(): Promise<Record<string, any>>;
   auth(): Promise<AuthState>;
+  tabs(): Promise<TabState[]>;
   traces(): Promise<Pagination<TraceRecord>>;
   navigate(url: string): Promise<CommandResult>;
+  openTab(url?: string): Promise<CommandResult>;
+  switchTab(tabId: string): Promise<CommandResult>;
+  closeTab(tabId?: string): Promise<CommandResult>;
   click(targetId: string): Promise<CommandResult>;
   type(targetId: string, text: string, options?: Record<string, any>): Promise<CommandResult>;
   select(targetId: string, value: string): Promise<CommandResult>;
@@ -266,4 +277,4 @@ export interface BrowserSessionContract {
   close(): Promise<void>;
 }
 
-export type { ActionRecord, AuthState, AvailableAction, SemanticSnapshot, SessionState };
+export type { ActionRecord, AuthState, AvailableAction, SemanticSnapshot, SessionState, TabState };

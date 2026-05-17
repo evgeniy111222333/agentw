@@ -9,4 +9,5 @@ export type {
   ExecuteActionOptions,
   Pagination,
   AuthState,
+  TabState,
 } from './types';

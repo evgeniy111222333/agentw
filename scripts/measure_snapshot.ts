@@ -1,5 +1,6 @@
 import { chromium } from 'playwright';
 import { SemanticLayer } from '../src/layer4_semantic/SemanticLayer';
+import { BrowserCore } from '../src/layer1_browser_core/BrowserCore';
 
 async function main() {
   const browser = await chromium.launch({
@@ -72,11 +73,51 @@ async function main() {
         cache_status: second.meta?.cache_status,
         plugin_contributions: second.meta?.plugin_contributions,
       },
+      tabs: await measureTabs(),
     };
 
     console.log(JSON.stringify(report, null, 2));
   } finally {
     await browser.close();
+  }
+}
+
+async function measureTabs() {
+  const core = new BrowserCore();
+  await core.initialize();
+  try {
+    const sessionId = 'measurement-tabs';
+    await core.createSession(sessionId);
+    const openStarted = performance.now();
+    const opened = await core.openTab(sessionId, `data:text/html;charset=utf-8,${encodeURIComponent(tabHtml('Measure Tab'))}`);
+    const openMs = Math.round(performance.now() - openStarted);
+
+    const listStarted = performance.now();
+    const tabsOpen = await core.listTabs(sessionId);
+    const listMs = Math.round(performance.now() - listStarted);
+
+    const switchStarted = performance.now();
+    const switched = await core.switchTab(sessionId, 'tab-1');
+    const switchMs = Math.round(performance.now() - switchStarted);
+
+    const closeStarted = performance.now();
+    const closed = await core.closeTab(sessionId, opened.tab_id);
+    const closeMs = Math.round(performance.now() - closeStarted);
+    const tabsFinal = await core.listTabs(sessionId);
+
+    return {
+      open_ms: openMs,
+      list_ms: listMs,
+      switch_ms: switchMs,
+      close_ms: closeMs,
+      opened: { tab_id: opened.tab_id, title: opened.title },
+      after_open_count: tabsOpen.length,
+      switched_to: switched.tab_id,
+      closed: closed.closed_tab_id,
+      final_count: tabsFinal.length,
+    };
+  } finally {
+    await core.close();
   }
 }
 
@@ -144,6 +185,14 @@ function benchmarkHtml(): string {
       </table>
     </main>
   </body>
+</html>`;
+}
+
+function tabHtml(title: string): string {
+  return `<!doctype html>
+<html>
+  <head><title>${title}</title></head>
+  <body><main><h1>${title}</h1></main></body>
 </html>`;
 }
 

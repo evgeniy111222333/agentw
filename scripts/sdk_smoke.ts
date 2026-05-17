@@ -27,6 +27,14 @@ async function main() {
 
   try {
     const navigate = await session.navigate(`data:text/html;charset=utf-8,${encodeURIComponent(smokeHtml())}`);
+    const openedTab = await session.openTab(`data:text/html;charset=utf-8,${encodeURIComponent(tabHtml('SDK Tab'))}`);
+    const openedTabId = openedTab.data?.tab?.tab_id;
+    if (!openedTabId) throw new Error('SDK openTab did not return tab_id');
+    const tabsOpen = await session.tabs();
+    const switchedTab = await session.switchTab('tab-1');
+    const closedTab = await session.closeTab(openedTabId);
+    const tabsFinal = await session.tabs();
+
     const inputAction = navigate.snapshot.available_actions.find((action) => action.action === 'type');
     if (!inputAction?.target) throw new Error('No input action discovered by SDK smoke');
     const samAction = navigate.snapshot.available_actions.find((action) => action.action === 'save_profile');
@@ -81,6 +89,21 @@ async function main() {
         {
           session_id: session.id,
           navigate: summarize(navigate),
+          tabs: {
+            opened: {
+              tab_id: openedTabId,
+              title: openedTab.snapshot.title,
+              snapshot_tab: openedTab.snapshot.session.tab_id,
+              count: openedTab.snapshot.session.tabs_count,
+            },
+            after_open: tabsOpen.map((tab) => ({ tab_id: tab.tab_id, active: tab.active, title: tab.title })),
+            switched: {
+              title: switchedTab.snapshot.title,
+              snapshot_tab: switchedTab.snapshot.session.tab_id,
+            },
+            closed: closedTab.data?.closed_tab_id,
+            final_count: tabsFinal.length,
+          },
           typed: summarize(typed),
           filled: summarize(filled),
           sequence: summarize(sequence),
@@ -202,6 +225,19 @@ function smokeHtml(): string {
       <input id="file-input" type="file" onchange="document.getElementById('file-status').textContent = this.files[0].name + ':' + this.files[0].size">
       <p id="file-status">empty</p>
       <a id="download-link" download="report.txt" href="data:text/plain;base64,c2RrLXJlcG9ydA==">Download report</a>
+    </main>
+  </body>
+</html>`;
+}
+
+function tabHtml(title: string): string {
+  return `<!doctype html>
+<html>
+  <head><title>${title}</title></head>
+  <body>
+    <main>
+      <h1>${title}</h1>
+      <p>Second tab content</p>
     </main>
   </body>
 </html>`;

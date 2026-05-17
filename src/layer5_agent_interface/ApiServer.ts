@@ -17,6 +17,7 @@ import { Probe } from '../health/Probe';
 import { importedActions, importedSession, importedSnapshot, makePack, readPack } from '../session/Pack';
 import { globalTraceStore } from '../trace/Trace';
 import { globalSemCache } from '../cache/Sem';
+import { activeTab, deleteSessionSnaps, snapKey } from '../session/Tabs';
 
 export class ApiServer {
   private app = express();
@@ -140,10 +141,11 @@ export class ApiServer {
         }
 
         await this.browserCore.createSession(sessionId, { storageState: pack.browser.storage_state });
-        this.stateManager.registerSession(sessionId, importedSession(pack, sessionId));
+        const restoredSession = importedSession(pack, sessionId);
+        this.stateManager.registerSession(sessionId, restoredSession);
         this.stateManager.setActionHistory(sessionId, importedActions(pack, sessionId));
         const snapshot = importedSnapshot(pack, sessionId);
-        if (snapshot) this.previousSnapshots.set(sessionId, snapshot);
+        if (snapshot) this.previousSnapshots.set(snapKey(sessionId, snapshot.session.tab_id), snapshot);
 
         const page = this.browserCore.getPage(sessionId);
         await this.stateManager.injectMutationObserver(page, sessionId);
@@ -170,7 +172,7 @@ export class ApiServer {
         if (sessionId) {
           await this.browserCore.closeSession(sessionId).catch(() => undefined);
           this.stateManager.closeSession(sessionId);
-          this.previousSnapshots.delete(sessionId);
+          deleteSessionSnaps(this.previousSnapshots, sessionId);
         }
         this.sendRestError(res, normalizeError(error, { operation: 'import_session' }));
       }
@@ -192,7 +194,7 @@ export class ApiServer {
             url: page.url(),
             title: await page.title(),
           },
-          snapshot: this.previousSnapshots.get(req.params.id),
+          snapshot: this.activeSnapshot(req.params.id),
         });
         globalMetrics.increment('llm_browser_sessions_exported_total');
         res.json(pack);
@@ -208,7 +210,7 @@ export class ApiServer {
           return this.sendRestError(res, new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found'));
         }
         const page = this.browserCore.getPage(req.params.id);
-        const snapshot = this.previousSnapshots.get(req.params.id);
+        const snapshot = this.activeSnapshot(req.params.id);
         res.json({
           session,
           page: {
@@ -244,6 +246,67 @@ export class ApiServer {
         res.json(result);
       } catch (error) {
         this.sendRestError(res, normalizeError(error));
+      }
+    });
+
+    this.app.get('/api/v2/sessions/:id/tabs', async (req, res) => {
+      try {
+        const session = this.stateManager.getSessionState(req.params.id);
+        if (!session) {
+          return this.sendRestError(res, new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found'));
+        }
+        const tabs = await this.browserCore.listTabs(req.params.id);
+        this.stateManager.syncTabs(req.params.id, tabs);
+        res.json({ tabs });
+      } catch (error) {
+        this.sendRestError(res, normalizeError(error, { operation: 'list_tabs' }));
+      }
+    });
+
+    this.app.post('/api/v2/sessions/:id/tabs', async (req, res) => {
+      try {
+        const result = await this.commandRouter.execute({
+          action: 'open_tab',
+          session_id: req.params.id,
+          action_params: {
+            url: req.body?.url,
+          },
+          trace_id: req.body?.trace_id,
+        });
+        res.status(201).json(result);
+      } catch (error) {
+        this.sendRestError(res, normalizeError(error, { operation: 'open_tab' }));
+      }
+    });
+
+    this.app.post('/api/v2/sessions/:id/tabs/:tabId/switch', async (req, res) => {
+      try {
+        const result = await this.commandRouter.execute({
+          action: 'switch_tab',
+          session_id: req.params.id,
+          action_params: {
+            tab_id: req.params.tabId,
+          },
+          trace_id: req.body?.trace_id,
+        });
+        res.json(result);
+      } catch (error) {
+        this.sendRestError(res, normalizeError(error, { operation: 'switch_tab' }));
+      }
+    });
+
+    this.app.delete('/api/v2/sessions/:id/tabs/:tabId', async (req, res) => {
+      try {
+        const result = await this.commandRouter.execute({
+          action: 'close_tab',
+          session_id: req.params.id,
+          action_params: {
+            tab_id: req.params.tabId,
+          },
+        });
+        res.json(result);
+      } catch (error) {
+        this.sendRestError(res, normalizeError(error, { operation: 'close_tab' }));
       }
     });
 
@@ -301,7 +364,7 @@ export class ApiServer {
       try {
         await this.browserCore.closeSession(req.params.id);
         this.stateManager.closeSession(req.params.id);
-        this.previousSnapshots.delete(req.params.id);
+        deleteSessionSnaps(this.previousSnapshots, req.params.id);
         globalMetrics.increment('llm_browser_sessions_closed_total');
         res.status(204).send();
       } catch (error: any) {
@@ -392,6 +455,11 @@ export class ApiServer {
         context: error.context,
       },
     });
+  }
+
+  private activeSnapshot(sessionId: string): SemanticSnapshot | undefined {
+    const tab = activeTab(this.stateManager.getSessionState(sessionId));
+    return tab ? this.previousSnapshots.get(snapKey(sessionId, tab.tab_id)) : undefined;
   }
 }
 

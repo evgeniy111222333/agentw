@@ -10,6 +10,7 @@ import { globalAuditLog, riskScoreForAction } from '../common/AuditLog';
 import { SecurityPolicy } from '../security/SecurityPolicy';
 import { OpStart, OpStatus, OpStore } from '../op/Op';
 import { globalTraceStore } from '../trace/Trace';
+import { activeTab, snapKey } from '../session/Tabs';
 
 export interface AgentCommand {
   action: string;
@@ -65,6 +66,11 @@ const actionSchemas: Record<string, ActionSchema> = {
   hover: { target: 'required', retryable: true },
   keyboard: { target: 'none', requiredParams: ['key'] },
   navigate: { target: 'none', requiredParams: ['url'], retryable: true },
+  open_tab: { target: 'none', retryable: true },
+  new_tab: { target: 'none', retryable: true },
+  switch_tab: { target: 'optional', retryable: true },
+  close_tab: { target: 'optional', retryable: true },
+  list_tabs: { target: 'none' },
   refresh: { target: 'none', retryable: true },
   screenshot: { target: 'optional', retryable: true },
   screenshot_file: { target: 'optional', retryable: true },
@@ -247,7 +253,10 @@ export class CommandRouter {
     const status = this.getOp(String(operationId));
     if (!status) throw new LlmBrowserError('ELEMENT_NOT_FOUND', 'Operation not found', { operation_id: operationId });
     if (status.result?.snapshot) {
-      this.previousSnapshots.set(status.result.snapshot.session.session_id, status.result.snapshot);
+      this.previousSnapshots.set(
+        snapKey(status.result.snapshot.session.session_id, status.result.snapshot.session.tab_id),
+        status.result.snapshot
+      );
     }
     return status;
   }
@@ -340,8 +349,10 @@ export class CommandRouter {
         );
       }
 
+      await this.syncTabs(command.session_id);
       const page = this.browserCore.getPage(command.session_id);
-      const previousSnapshot = this.previousSnapshots.get(command.session_id);
+      const active = activeTab(this.stateManager.getSessionState(command.session_id));
+      const previousSnapshot = active ? this.previousSnapshots.get(snapKey(command.session_id, active.tab_id)) : undefined;
       const snapshot = await this.traceAsync(
         traceId,
         'semantic.extract',
@@ -357,7 +368,10 @@ export class CommandRouter {
         })
       );
 
-      this.previousSnapshots.set(command.session_id, snapshot);
+      if (activeAction.executionAction === 'close_tab' && execution?.data?.closed_tab_id) {
+        this.previousSnapshots.delete(snapKey(command.session_id, String(execution.data.closed_tab_id)));
+      }
+      this.previousSnapshots.set(snapKey(command.session_id, snapshot.session.tab_id), snapshot);
       this.stateManager.recordPageState(command.session_id, {
         url: snapshot.url,
         title: snapshot.title,
@@ -565,7 +579,8 @@ export class CommandRouter {
   }
 
   private resolveDynamicAction(command: AgentCommand): ResolvedAction | undefined {
-    const snapshot = this.previousSnapshots.get(command.session_id);
+    const tab = activeTab(this.stateManager.getSessionState(command.session_id));
+    const snapshot = tab ? this.previousSnapshots.get(snapKey(command.session_id, tab.tab_id)) : undefined;
     if (!snapshot) return undefined;
 
     const availableAction = snapshot.available_actions.find((candidate) => {
@@ -622,13 +637,19 @@ export class CommandRouter {
 
   private createSessionInfo(sessionId: string): SessionInfo {
     const state = this.stateManager.getSessionState(sessionId);
+    const tab = activeTab(state);
     return {
       session_id: sessionId,
-      tab_id: 'tab-1',
+      tab_id: tab?.tab_id ?? 'tab-1',
       tabs_count: state?.tabs.length ?? 1,
       history_length: state?.history.length ?? 0,
       cookies_count: state?.cookies.length ?? 0,
     };
+  }
+
+  private async syncTabs(sessionId: string): Promise<void> {
+    const tabs = await this.browserCore.listTabs(sessionId);
+    this.stateManager.syncTabs(sessionId, tabs);
   }
 
   private recordAction(record: ActionRecord): void {
@@ -720,6 +741,7 @@ function stripOpParams(params: Record<string, any>): Record<string, any> {
 function estimateMs(action: string, params: Record<string, any>): number {
   if (typeof params.estimated_time_ms === 'number') return params.estimated_time_ms;
   if (action === 'navigate') return Number(params.timeout_ms ?? 5000);
+  if (action === 'open_tab' || action === 'new_tab') return params.url ? Number(params.timeout_ms ?? 5000) : 500;
   if (action === 'wait_for') return Number(params.timeout_ms ?? 10000);
   if (action === 'wait') return Math.min(Number(params.ms ?? 500), 10000);
   if (['download', 'upload', 'screenshot_file', 'screenshot_to_file', 'pdf', 'pdf_generate'].includes(action)) return 2000;

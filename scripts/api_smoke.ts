@@ -38,6 +38,34 @@ async function main() {
       },
     });
 
+    const openTabResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/tabs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        url: `data:text/html;charset=utf-8,${encodeURIComponent(tabHtml('API Tab'))}`,
+      }),
+    });
+    assertOk(openTabResponse, 'open tab');
+    const openedTab = await openTabResponse.json();
+    const openedTabId = openedTab.data?.tab?.tab_id;
+    if (!openedTabId) throw new Error('open tab did not return tab_id');
+
+    const tabsOpenResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/tabs`);
+    assertOk(tabsOpenResponse, 'list tabs after open');
+    const tabsOpen = await tabsOpenResponse.json();
+
+    const switchTabResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/tabs/tab-1/switch`, { method: 'POST' });
+    assertOk(switchTabResponse, 'switch tab');
+    const switchedTab = await switchTabResponse.json();
+
+    const closeTabResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/tabs/${openedTabId}`, { method: 'DELETE' });
+    assertOk(closeTabResponse, 'close tab');
+    const closedTab = await closeTabResponse.json();
+
+    const tabsFinalResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/tabs`);
+    assertOk(tabsFinalResponse, 'list tabs final');
+    const tabsFinal = await tabsFinalResponse.json();
+
     const typeAction = navigate.snapshot.available_actions.find((action: any) => action.action === 'type');
     if (!typeAction) throw new Error('type action was not discovered');
     const samAction = navigate.snapshot.available_actions.find((action: any) => action.action === 'add_to_cart');
@@ -261,6 +289,21 @@ async function main() {
     const report = {
       session_id: activeSessionId,
       navigate: summarizeRpc(navigate),
+      tabs: {
+        opened: {
+          tab_id: openedTabId,
+          title: openedTab.snapshot.title,
+          snapshot_tab: openedTab.snapshot.session.tab_id,
+          count: openedTab.snapshot.session.tabs_count,
+        },
+        after_open: tabsOpen.tabs.map((tab: any) => ({ tab_id: tab.tab_id, active: tab.active, title: tab.title })),
+        switched: {
+          title: switchedTab.snapshot.title,
+          snapshot_tab: switchedTab.snapshot.session.tab_id,
+        },
+        closed: closedTab.data?.closed_tab_id,
+        final_count: tabsFinal.tabs.length,
+      },
       rest_type: summarizeRpc(restType),
       fill_form: summarizeRpc(fillForm),
       search: {
@@ -508,6 +551,19 @@ function smokeHtml(): string {
       <script type="application/llm-actions+json">
         {"actions":[{"action":"checkout","label":"Checkout via SAM","selector":"#add-button","execution":{"action":"click"}}]}
       </script>
+    </main>
+  </body>
+</html>`;
+}
+
+function tabHtml(title: string): string {
+  return `<!doctype html>
+<html>
+  <head><title>${title}</title></head>
+  <body>
+    <main>
+      <h1>${title}</h1>
+      <p>Second tab content</p>
     </main>
   </body>
 </html>`;

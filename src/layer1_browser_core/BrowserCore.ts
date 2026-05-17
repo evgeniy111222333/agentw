@@ -1,5 +1,6 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { ConfigurationManager } from '../config/ConfigurationManager';
+import { TabState } from '../common/types';
 
 export interface CreateSessionOptions {
   storageState?: any;
@@ -9,7 +10,9 @@ export interface CreateSessionOptions {
 export class BrowserCore {
   private browser: Browser | null = null;
   private contexts: Map<string, BrowserContext> = new Map();
-  private pages: Map<string, Page> = new Map();
+  private pages: Map<string, Map<string, Page>> = new Map();
+  private activeTabs: Map<string, string> = new Map();
+  private tabSeq: Map<string, number> = new Map();
 
   async initialize(): Promise<void> {
     const config = ConfigurationManager.getInstance().getConfig().browser;
@@ -32,8 +35,15 @@ export class BrowserCore {
     });
     
     this.contexts.set(sessionId, context);
+    this.pages.set(sessionId, new Map());
     const page = await context.newPage();
-    this.pages.set(sessionId, page);
+    this.registerPage(sessionId, page, 'tab-1');
+    this.activeTabs.set(sessionId, 'tab-1');
+    this.tabSeq.set(sessionId, 1);
+    context.on('page', (newPage) => {
+      const tabId = this.registerPage(sessionId, newPage);
+      this.activeTabs.set(sessionId, tabId);
+    });
     if (options.url) {
       await page.goto(options.url, { waitUntil: 'load' });
     }
@@ -45,13 +55,22 @@ export class BrowserCore {
       await context.close();
       this.contexts.delete(sessionId);
       this.pages.delete(sessionId);
+      this.activeTabs.delete(sessionId);
+      this.tabSeq.delete(sessionId);
     }
   }
 
-  getPage(sessionId: string): Page {
-    const page = this.pages.get(sessionId);
+  getPage(sessionId: string, tabId?: string): Page {
+    const targetTab = tabId ?? this.getActiveTabId(sessionId);
+    const page = this.pages.get(sessionId)?.get(targetTab);
     if (!page) throw new Error(`Page for session ${sessionId} not found`);
     return page;
+  }
+
+  getActiveTabId(sessionId: string): string {
+    const tabId = this.activeTabs.get(sessionId);
+    if (!tabId) throw new Error(`Active tab for session ${sessionId} not found`);
+    return tabId;
   }
 
   getContext(sessionId: string): BrowserContext {
@@ -61,7 +80,7 @@ export class BrowserCore {
   }
 
   hasSession(sessionId: string): boolean {
-    return this.contexts.has(sessionId) && this.pages.has(sessionId);
+    return this.contexts.has(sessionId) && Boolean(this.pages.get(sessionId)?.size);
   }
 
   async storageState(sessionId: string): Promise<any> {
@@ -72,13 +91,70 @@ export class BrowserCore {
     return {
       initialized: Boolean(this.browser),
       contexts: this.contexts.size,
-      pages: this.pages.size,
+      pages: Array.from(this.pages.values()).reduce((total, tabs) => total + tabs.size, 0),
     };
   }
 
   async navigate(sessionId: string, url: string): Promise<void> {
     const page = this.getPage(sessionId);
     await page.goto(url, { waitUntil: 'load' });
+  }
+
+  async listTabs(sessionId: string): Promise<TabState[]> {
+    const tabs = this.pages.get(sessionId);
+    if (!tabs) throw new Error(`Session ${sessionId} not found`);
+    const active = this.getActiveTabId(sessionId);
+    const result: TabState[] = [];
+    for (const [tabId, page] of tabs) {
+      result.push({
+        tab_id: tabId,
+        url: page.url(),
+        title: await page.title().catch(() => ''),
+        active: tabId === active,
+      });
+    }
+    return result;
+  }
+
+  async openTab(sessionId: string, url?: string): Promise<TabState> {
+    const context = this.getContext(sessionId);
+    const page = await context.newPage();
+    const tabId = this.registerPage(sessionId, page);
+    this.activeTabs.set(sessionId, tabId);
+    if (url) {
+      await page.goto(url, { waitUntil: 'load' });
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);
+    }
+    return this.tabInfo(sessionId, tabId);
+  }
+
+  async switchTab(sessionId: string, tabId: string): Promise<TabState> {
+    const page = this.getPage(sessionId, tabId);
+    this.activeTabs.set(sessionId, tabId);
+    await page.bringToFront().catch(() => undefined);
+    return this.tabInfo(sessionId, tabId);
+  }
+
+  async closeTab(sessionId: string, tabId?: string): Promise<{ closed_tab_id: string; active_tab: TabState }> {
+    const targetTab = tabId ?? this.getActiveTabId(sessionId);
+    const tabs = this.pages.get(sessionId);
+    const page = tabs?.get(targetTab);
+    if (!tabs || !page) throw new Error(`Tab ${targetTab} not found`);
+    if (tabs.size <= 1) throw new Error('Cannot close last tab');
+
+    tabs.delete(targetTab);
+    await page.close().catch(() => undefined);
+    if (this.activeTabs.get(sessionId) === targetTab) {
+      const nextTab = tabs.keys().next().value;
+      if (!nextTab) throw new Error('No tab available after close');
+      this.activeTabs.set(sessionId, nextTab);
+      await tabs.get(nextTab)?.bringToFront().catch(() => undefined);
+    }
+
+    return {
+      closed_tab_id: targetTab,
+      active_tab: await this.tabInfo(sessionId, this.getActiveTabId(sessionId)),
+    };
   }
 
   async close(): Promise<void> {
@@ -89,5 +165,45 @@ export class BrowserCore {
       await this.browser.close();
       this.browser = null;
     }
+  }
+
+  private registerPage(sessionId: string, page: Page, preferredTabId?: string): string {
+    const tabs = this.pages.get(sessionId);
+    if (!tabs) throw new Error(`Session ${sessionId} not found`);
+    for (const [tabId, existing] of tabs) {
+      if (existing === page) return tabId;
+    }
+
+    const tabId = preferredTabId ?? this.nextTabId(sessionId);
+    tabs.set(tabId, page);
+    page.on('close', () => this.detachPage(sessionId, tabId));
+    return tabId;
+  }
+
+  private detachPage(sessionId: string, tabId: string): void {
+    const tabs = this.pages.get(sessionId);
+    if (!tabs?.has(tabId)) return;
+    tabs.delete(tabId);
+    if (this.activeTabs.get(sessionId) === tabId) {
+      const nextTab = tabs.keys().next().value;
+      if (nextTab) this.activeTabs.set(sessionId, nextTab);
+      else this.activeTabs.delete(sessionId);
+    }
+  }
+
+  private nextTabId(sessionId: string): string {
+    const next = (this.tabSeq.get(sessionId) ?? 1) + 1;
+    this.tabSeq.set(sessionId, next);
+    return `tab-${next}`;
+  }
+
+  private async tabInfo(sessionId: string, tabId: string): Promise<TabState> {
+    const page = this.getPage(sessionId, tabId);
+    return {
+      tab_id: tabId,
+      url: page.url(),
+      title: await page.title().catch(() => ''),
+      active: tabId === this.getActiveTabId(sessionId),
+    };
   }
 }

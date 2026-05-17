@@ -28,6 +28,8 @@ const operatorActions = new Set([
   'loop',
   'multi_click',
   'navigate',
+  'new_tab',
+  'open_tab',
   'parallel',
   'refresh',
   'pdf',
@@ -36,11 +38,14 @@ const operatorActions = new Set([
   'screenshot_file',
   'screenshot_to_file',
   'search_and_paginate',
+  'close_tab',
+  'list_tabs',
   'scroll',
   'scroll_to_element',
   'select',
   'sequence',
   'submit',
+  'switch_tab',
   'type',
   'upload',
   'wait',
@@ -85,7 +90,7 @@ export class SecurityPolicy {
       });
     }
 
-    if (command.action === 'navigate') {
+    if (command.action === 'navigate' || ((command.action === 'open_tab' || command.action === 'new_tab') && command.action_params?.url !== undefined)) {
       this.checkDomain(command.action_params?.url);
     }
     for (const url of collectNestedNavigateUrls(command.action_params)) {
@@ -108,7 +113,7 @@ export class SecurityPolicy {
     }
 
     const specificLimit =
-      action === 'navigate'
+      action === 'navigate' || action === 'open_tab' || action === 'new_tab'
         ? config.navigate_rate_limit_per_minute
         : ['screenshot', 'screenshot_file', 'screenshot_to_file', 'pdf', 'pdf_generate'].includes(action)
           ? config.screenshot_rate_limit_per_minute
@@ -182,7 +187,9 @@ function collectNestedNavigateUrls(params: unknown, depth = 0): unknown[] {
   const visitStep = (step: any) => {
     if (!step || typeof step !== 'object') return;
     const stepParams = step.params ?? step.action_params ?? step.parameters ?? {};
-    if (step.action === 'navigate') urls.push(stepParams.url);
+    if (step.action === 'navigate' || ((step.action === 'open_tab' || step.action === 'new_tab') && stepParams.url !== undefined)) {
+      urls.push(stepParams.url);
+    }
     urls.push(...collectNestedNavigateUrls(stepParams, depth + 1));
   };
 

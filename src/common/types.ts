@@ -52,6 +52,15 @@ export interface SessionInfo {
   cookies_count: number;
 }
 
+export interface TabState {
+  tab_id: string;
+  url: string;
+  title: string;
+  active: boolean;
+  snapshot_id?: string;
+  form_states?: any;
+}
+
 export interface SnapshotMeta {
   page_load_time?: number;
   action_time?: number;
@@ -159,7 +168,7 @@ export interface SessionState {
   updated_at: string;
   status: 'active' | 'idle' | 'closed' | 'suspended' | 'expired';
   current_url: string;
-  tabs: Array<{ tab_id: string; url: string; title: string; active: boolean; snapshot_id?: string; form_states?: any }>;
+  tabs: TabState[];
   cookies: any[];
   localStorage: Record<string, string>;
   history: Array<{ url: string; timestamp: string; navigation_type?: string; referrer?: string }>;
