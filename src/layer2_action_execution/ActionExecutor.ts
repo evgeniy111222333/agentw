@@ -20,6 +20,7 @@ const ACTION_RISK_SCORE: Record<string, number> = {
   multi_click: 20, sequence: 30, parallel: 25, 'if': 10, loop: 20,
   fill_and_verify: 35, navigate_and_extract: 35, login_flow: 75,
   async_navigate: 30, cancel: 15, interact: 20,
+  media_control: 20,
   upload: 40, download: 40, screenshot: 5, screenshot_file: 10, pdf: 15,
   fs: 30, refresh: 15, open_tab: 10, new_tab: 10, switch_tab: 5, close_tab: 15,
   define_script: 5, call_script: 30, 'try': 20,
@@ -272,6 +273,9 @@ export class ActionExecutor {
         return;
       }
 
+      case 'media_control':
+        return this.mediaControl(page, targetId, params);
+
       case 'scroll':
       case 'scroll_to_element': {
         const amount = Number(params.amount ?? 720);
@@ -461,6 +465,59 @@ export class ActionExecutor {
       timeout_ms: timeoutMs,
       poll_interval_ms: params.poll_interval_ms,
     });
+  }
+
+  private async mediaControl(page: Page, targetId: string | undefined, params: any): Promise<Record<string, any>> {
+    if (!targetId) throw new Error('target_id is required for media_control');
+    const locator = await this.resolveActionableLocator(page, targetId, 'media_control', params);
+    const result = await locator.evaluate(async (node, input) => {
+      if (!(node instanceof HTMLMediaElement)) {
+        throw new Error('Target is not an audio/video media element');
+      }
+      const media = node;
+      const command = String(input.command ?? 'play');
+      switch (command) {
+        case 'play':
+          await media.play().catch((error) => {
+            throw new Error(`Media play failed: ${error?.message ?? error}`);
+          });
+          break;
+        case 'pause':
+        case 'stop':
+          media.pause();
+          if (command === 'stop') media.currentTime = 0;
+          break;
+        case 'seek':
+          media.currentTime = Math.max(0, Number(input.time_seconds ?? input.time ?? 0));
+          break;
+        case 'mute':
+          media.muted = true;
+          break;
+        case 'unmute':
+          media.muted = false;
+          break;
+        case 'set_volume':
+          media.volume = Math.min(1, Math.max(0, Number(input.volume ?? 1)));
+          break;
+        case 'set_playback_rate':
+          media.playbackRate = Math.max(0.0625, Number(input.rate ?? input.playback_rate ?? 1));
+          break;
+        default:
+          throw new Error(`Unsupported media command: ${command}`);
+      }
+      return {
+        command,
+        current_time: Number(media.currentTime.toFixed(3)),
+        duration: Number.isFinite(media.duration) ? Number(media.duration.toFixed(3)) : undefined,
+        paused: media.paused,
+        ended: media.ended,
+        muted: media.muted,
+        volume: Number(media.volume.toFixed(2)),
+        playback_rate: Number(media.playbackRate.toFixed(2)),
+      };
+    }, params);
+    await this.shortStabilization(page);
+    return result;
   }
 
   private async fillForm(

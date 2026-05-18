@@ -1,9 +1,9 @@
 export type ElementType = 
-  | 'heading' | 'text' | 'link' | 'button' | 'input' | 'select' | 'form'
+  | 'heading' | 'text' | 'link' | 'button' | 'input' | 'select' | 'textarea' | 'form'
   | 'table' | 'list' | 'image' | 'navigation' | 'article' | 'card' | 'pagination'
   | 'modal' | 'tab_group' | 'accordion' | 'notification' | 'video' | 'breadcrumb'
   | 'progress' | 'chart' | 'iframe' | 'embed' | 'shadow_host' | 'dialog' | 'menu' | 'menu_item' | 'badge'
-  | 'tooltip' | 'separator' | 'carousel' | 'rating' | 'stepper' | 'skeleton';
+  | 'tooltip' | 'separator' | 'carousel' | 'rating' | 'stepper' | 'skeleton' | 'audio';
 
 export interface SemanticElement {
   id: string;

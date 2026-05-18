@@ -323,6 +323,20 @@ export class ActionValidator {
         }
         break;
 
+      case 'media_control':
+        if (!['video', 'audio'].includes(element.type)) {
+          return {
+            valid: false,
+            error: {
+              code: 'TYPE_MISMATCH',
+              message: `Cannot run media_control on element "${element.id}" of type "${element.type}".`,
+              suggestion: 'Look for a video or audio element instead.',
+              context: { element_type: element.type },
+            },
+          };
+        }
+        break;
+
       case 'submit':
         if (!['form', 'button', 'input'].includes(element.type)) {
           return {

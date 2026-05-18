@@ -3,6 +3,22 @@ import { SemanticLayer } from '../src/layer4_semantic/SemanticLayer';
 import { BrowserCore } from '../src/layer1_browser_core/BrowserCore';
 import { viewProfiles } from '../src/device/View';
 
+const COMPONENT_TYPES = new Set([
+  'card',
+  'pagination',
+  'breadcrumb',
+  'accordion',
+  'carousel',
+  'rating',
+  'stepper',
+  'skeleton',
+  'chart',
+  'tab_group',
+  'menu',
+  'modal',
+  'dialog',
+]);
+
 async function main() {
   const browser = await chromium.launch({
     headless: true,
@@ -69,6 +85,11 @@ async function main() {
           confidence: first.auth?.confidence,
           indicators: first.auth?.indicators,
         },
+        type_counts: countBy(first.elements, (element) => element.type),
+        classification_levels: countBy(first.elements, (element) => element.classification?.level ?? 'unknown'),
+        low_confidence: first.elements.filter((element) => element.classification?.low_confidence).length,
+        component_types: countBy(first.elements.filter((element) => element.component || COMPONENT_TYPES.has(element.type)), (element) => element.type),
+        media_types: countBy(first.elements.filter((element) => element.media_state || element.data_summary || ['image', 'video', 'audio', 'chart'].includes(element.type)), (element) => element.type),
         cache_status: first.meta?.cache_status,
       },
       repeat_snapshot: {
@@ -170,13 +191,26 @@ function benchmarkHtml(): string {
     <style>
       body { font-family: sans-serif; }
       .muted { color: #666; }
+      .product-card { width: 320px; border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 12px 0; }
+      .pagination a { margin-right: 8px; }
+      .skeleton { width: 220px; height: 24px; background: #eee; display: block; }
+      .rating { cursor: default; }
+      canvas { width: 420px; height: 160px; }
     </style>
   </head>
   <body>
     ${decorativeNoise}
+    <nav aria-label="Breadcrumb" class="breadcrumbs">
+      <a href="/home">Home</a>
+      <a href="/billing">Billing</a>
+      <span aria-current="page">Checkout</span>
+    </nav>
     <nav>
       <a href="/home">Home</a>
       <a href="/cart">Cart <span id="cart-count">0</span></a>
+    </nav>
+    <nav class="pagination" data-current="2" data-total-pages="5">
+      <a href="?page=1">1</a><a href="?page=2" aria-current="page">2</a><a href="?page=3">Next</a>
     </nav>
     <main>
       <h1>Checkout</h1>
@@ -187,12 +221,33 @@ function benchmarkHtml(): string {
         <label>Email <input name="email" type="email" required placeholder="you@example.com"></label>
         <label>Password <input name="password" type="password" value="secret"></label>
         <select name="plan">
-          <option value="basic">Basic</option>
-          <option value="pro" selected>Pro</option>
+          <optgroup label="Public">
+            <option value="basic">Basic</option>
+            <option value="pro" selected>Pro</option>
+          </optgroup>
+          <optgroup label="Enterprise">
+            <option value="team">Team</option>
+          </optgroup>
         </select>
+        <textarea id="notes" name="notes" placeholder="Internal notes" maxlength="500"></textarea>
         <input name="invoice" type="file">
         <button type="submit">Pay now</button>
       </form>
+      <div id="plan-card" class="product-card" data-title="API Credits" data-subtitle="$20 prepaid">
+        <img id="plan-img" src="credits.webp" alt="API credits pack" width="80" height="60">
+        <h2>API Credits</h2>
+        <p>$20 prepaid balance</p>
+        <button id="card-buy" class="btn-primary">Add pack</button>
+      </div>
+      <details id="faq" class="accordion-item" open><summary>Billing policy</summary><p>Monthly invoices are available.</p></details>
+      <div id="plans-carousel" class="carousel"><div class="slide active">Starter</div><div class="slide">Scale</div><button>Next</button></div>
+      <div id="rating" class="rating" aria-label="4.5 out of 5 stars">★★★★☆</div>
+      <ol id="steps" class="checkout steps"><li>Cart</li><li aria-current="step">Payment</li><li>Done</li></ol>
+      <div id="loading" class="skeleton shimmer" aria-label="Loading row"></div>
+      <canvas id="usage-chart" data-chart-type="bar" data-chart-data="Usage rose from 1200 to 2400 requests"></canvas>
+      <svg id="retention-chart" class="chart" width="220" height="120" viewBox="0 0 220 120"><title>Retention</title><desc>Retention by cohort</desc><text x="10" y="20">Week 1 92%</text></svg>
+      <video id="intro-video" title="Intro video" controls poster="intro.jpg"><source src="intro.mp4" type="video/mp4"><track kind="captions" src="intro.vtt" label="English"></video>
+      <audio id="briefing" title="Briefing" controls><source src="briefing.mp3" type="audio/mpeg"><track kind="captions" src="briefing.vtt" label="Transcript"></audio>
       <a download="invoice.csv" href="data:text/csv;base64,aXRlbSxwcmljZQpjcmVkaXRzLDIw">Download invoice</a>
       <iframe id="measure-frame" title="Embedded checkout helper" srcdoc="<button id='frame-help'>Frame Help</button><input id='frame-note' placeholder='Frame note'>"></iframe>
       <iframe id="measure-video" title="Demo video" src="https://www.youtube.com/embed/abc123"></iframe>
@@ -249,6 +304,14 @@ function tabHtml(title: string): string {
     </script>
   </body>
 </html>`;
+}
+
+function countBy<T>(items: T[], key: (item: T) => string): Record<string, number> {
+  return items.reduce<Record<string, number>>((counts, item) => {
+    const value = key(item);
+    counts[value] = (counts[value] ?? 0) + 1;
+    return counts;
+  }, {});
 }
 
 main().catch((error) => {

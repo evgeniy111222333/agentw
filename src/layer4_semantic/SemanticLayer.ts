@@ -176,13 +176,15 @@ export class SemanticLayer {
         return previousElementsMap.get(node.id)!;
       }
 
-      const type = this.classifier.classify(node);
+      const classification = this.classifier.classifyDetailed(node);
+      const type = classification.type;
       const content = this.extractor.extract(node, type);
       return {
         id: node.id,
         _hash: node._hash,
         type,
         role: node.role,
+        classification,
         ...content,
       };
     });
@@ -402,10 +404,21 @@ function collectAlerts(elements: SemanticElement[]): any[] | undefined {
 function collectNavigation(elements: SemanticElement[], belowFoldCount: number): any {
   const links = elements.filter((element) => element.type === 'link');
   const headings = elements.filter((element) => element.type === 'heading');
+  const breadcrumbs = elements.find((element) => element.type === 'breadcrumb');
+  const pagination = elements.find((element) => element.type === 'pagination');
   const navigationHeadings = headings.length > 0 ? headings : inferHeadings(elements);
 
   return {
     links_count: links.length,
+    breadcrumbs: breadcrumbs?.items,
+    pagination: pagination
+      ? {
+          current_page: pagination.current_page ?? pagination.current,
+          total_pages: pagination.total_pages ?? pagination.total,
+          has_next: pagination.has_next,
+          has_prev: pagination.has_prev,
+        }
+      : undefined,
     headings: navigationHeadings.slice(0, 12).map((heading) => ({
       id: heading.id,
       level: heading.level,

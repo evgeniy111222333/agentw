@@ -74,6 +74,7 @@ const ACTION_RISK_SCORE: Record<string, number> = {
   select: 15,
   close_tab: 15,
   interact: 20,
+  media_control: 20,
   loop: 20,
   multi_click: 20,
   try: 20,

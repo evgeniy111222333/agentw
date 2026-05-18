@@ -59,7 +59,7 @@ export interface TraversedNode {
     height: number;
     in_viewport: boolean;
   };
-  options?: Array<{ value: string; label: string; selected: boolean; disabled: boolean }>;
+  options?: Array<{ value: string; label: string; selected: boolean; disabled: boolean; optgroup?: string }>;
   form?: {
     action?: string;
     method?: string;
@@ -69,14 +69,98 @@ export interface TraversedNode {
     autocomplete?: string;
   };
   table?: {
+    caption?: string;
+    columns?: Array<{ id: string; label: string; sortable?: boolean; type?: string }>;
     rows: string[][];
     row_count: number;
     column_count: number;
     truncated: boolean;
+    sorted_by?: string;
+    sort_direction?: 'asc' | 'desc';
+    total_rows?: number;
+    pagination?: { page?: number; per_page?: number; total_pages?: number };
   };
   list?: {
     item_count: number;
     sample_items: string[];
+  };
+  dom?: {
+    id?: string;
+    classes?: string[];
+    child_element_count: number;
+    depth: number;
+    descendant_interactive_count: number;
+    descendant_image_count: number;
+    descendant_link_count: number;
+    nearest_form_id?: string;
+    previous_label?: string;
+  };
+  computed?: {
+    display?: string;
+    cursor?: string;
+    font_weight?: number;
+    font_size_px?: number;
+    background_color?: string;
+    border_radius_px?: number;
+    padding_px?: number;
+    gap_px?: number;
+  };
+  media?: {
+    kind: 'image' | 'video' | 'audio' | 'chart' | 'svg' | 'canvas' | string;
+    src?: string;
+    current_src?: string;
+    sources?: string[];
+    alt?: string;
+    width?: number;
+    height?: number;
+    natural_width?: number;
+    natural_height?: number;
+    format?: string;
+    loading?: string;
+    clickable?: boolean;
+    decorative?: boolean;
+    icon?: boolean;
+    context?: string;
+    duration?: number;
+    controls?: boolean;
+    poster?: string;
+    tracks?: Array<{ kind?: string; label?: string; src?: string; srclang?: string }>;
+    media_state?: Record<string, any>;
+    chart_type?: string;
+    data_summary?: string;
+    title?: string;
+    description?: string;
+    text_nodes?: string[];
+    view_box?: string;
+    has_bitmap?: boolean;
+    pixel_hash?: string;
+    vlm_status?: string;
+    ocr_status?: string;
+  };
+  component?: {
+    kind: string;
+    title?: string;
+    subtitle?: string;
+    image_id?: string;
+    actions?: string[];
+    items?: Array<Record<string, any>>;
+    pages?: Array<Record<string, any>>;
+    current?: number | string;
+    total?: number;
+    current_page?: number;
+    total_pages?: number;
+    has_next?: boolean;
+    has_prev?: boolean;
+    sections?: Array<Record<string, any>>;
+    slides?: Array<Record<string, any>>;
+    current_slide?: number;
+    value?: number;
+    max?: number;
+    count?: number;
+    steps?: Array<Record<string, any>>;
+    nav_type?: string;
+    tabs?: Array<Record<string, any>>;
+    active_panel_id?: string;
   };
 }
 
@@ -494,18 +578,32 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     for (const attr of Array.from(el.attributes)) {
       if (attrs.has(attr.name) || attr.name.startsWith('data-semantic-')) attributes[attr.name] = attr.value;
     }
+    if (el instanceof HTMLInputElement) {
+      if (el.value) attributes.value = el.value;
+      if (el.checked) attributes.checked = 'true';
+    } else if (el instanceof HTMLTextAreaElement) {
+      if (el.value) attributes.value = el.value;
+      attributes.rows = String(el.rows);
+      attributes.cols = String(el.cols);
+    } else if (el instanceof HTMLSelectElement) {
+      attributes.value = el.value;
+    }
     return attributes;
   };
   const extractSelectOptions = (el: HTMLElement, normalize: (value: string | null | undefined, limit: number) => string | undefined) => {
     if (!(el instanceof HTMLSelectElement)) return undefined;
     return Array.from(el.options)
       .slice(0, 50)
-      .map((option) => ({
-        value: option.value,
-        label: normalize(option.label || option.textContent, 120) ?? option.value,
-        selected: option.selected,
-        disabled: option.disabled,
-      }));
+      .map((option) => {
+        const group = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement.label : undefined;
+        return localDropUndefined({
+          value: option.value,
+          label: normalize(option.label || option.textContent, 120) ?? option.value,
+          selected: option.selected,
+          disabled: option.disabled || Boolean(option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled),
+          optgroup: normalize(group, 120),
+        });
+      });
   };
   const extractForm = (el: HTMLElement, ensureId: (el: HTMLElement) => string) => {
     if (!(el instanceof HTMLFormElement)) return undefined;
@@ -526,12 +624,34 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     if (!(el instanceof HTMLTableElement)) return undefined;
     const rows = Array.from(el.rows).map((row) => Array.from(row.cells).map((cell) => normalize(cell.textContent, 120) ?? ''));
     const visibleRows = rows.length > 8 ? [...rows.slice(0, 5), ['...'], ...rows.slice(-3)] : rows;
+    const headerCells = Array.from(el.tHead?.rows?.[0]?.cells ?? el.rows[0]?.cells ?? []);
+    const columns = headerCells.map((cell, index) => {
+      const text = normalize(cell.textContent, 120) ?? `Column ${index + 1}`;
+      const ariaSort = cell.getAttribute('aria-sort');
+      return localDropUndefined({
+        id: cell.id || text.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || `col_${index + 1}`,
+        label: text,
+        sortable: cell.getAttribute('aria-sort') !== null || cell.querySelector('[aria-sort], button, a') !== null || /\bsort/.test(cell.className),
+        type: inferColumnType(rows.slice(1).map((row) => row[index])),
+        sorted: ariaSort && ariaSort !== 'none' ? ariaSort : undefined,
+      });
+    });
+    const sorted = columns.find((column: any) => column.sorted);
+    const page = numberFrom(el.getAttribute('data-page') ?? el.closest('[data-page]')?.getAttribute('data-page'));
+    const perPage = numberFrom(el.getAttribute('data-per-page') ?? el.closest('[data-per-page]')?.getAttribute('data-per-page'));
+    const totalPages = numberFrom(el.getAttribute('data-total-pages') ?? el.closest('[data-total-pages]')?.getAttribute('data-total-pages'));
     return {
+      caption: normalize(el.caption?.textContent, 180),
+      columns: columns.map(({ sorted, ...column }: any) => column),
       rows: visibleRows,
       row_count: rows.length,
       column_count: Math.max(0, ...rows.map((row) => row.length)),
       truncated: rows.length > visibleRows.length,
-    };
+      sorted_by: sorted?.id,
+      sort_direction: sorted?.sorted === 'descending' ? 'desc' : sorted?.sorted === 'ascending' ? 'asc' : undefined,
+      total_rows: numberFrom(el.getAttribute('data-total-rows') ?? el.closest('[data-total-rows]')?.getAttribute('data-total-rows')) ?? rows.length,
+      pagination: page || perPage || totalPages ? localDropUndefined({ page, per_page: perPage, total_pages: totalPages }) : undefined,
+    } as TraversedNode['table'];
   };
   const extractList = (el: HTMLElement, normalize: (value: string | null | undefined, limit: number) => string | undefined) => {
     if (!(el instanceof HTMLUListElement || el instanceof HTMLOListElement)) return undefined;
@@ -542,6 +662,19 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
       item_count: items.length,
       sample_items: items.slice(0, 8),
     };
+  };
+  const numberFrom = (value: string | null | undefined): number | undefined => {
+    if (!value) return undefined;
+    const parsed = Number(String(value).replace(/[^\d.-]+/g, ''));
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  const inferColumnType = (values: string[]): string | undefined => {
+    const sample = values.filter(Boolean).slice(0, 8);
+    if (sample.length === 0) return undefined;
+    if (sample.every((value) => /^[-+]?\$?\d[\d,]*(\.\d+)?%?$/.test(value.trim()))) return 'number';
+    if (sample.every((value) => /^\d{4}-\d{2}-\d{2}|^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(value.trim()))) return 'date';
+    if (sample.every((value) => /^(true|false|yes|no|enabled|disabled)$/i.test(value.trim()))) return 'boolean';
+    return 'text';
   };
   const rawDomWithShadow = (all: Array<{ el: HTMLElement }>): string => {
     const clone = document.documentElement?.cloneNode(true) as Element | undefined;
@@ -559,45 +692,84 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     'action',
     'allow',
     'allowfullscreen',
+    'aria-busy',
     'alt',
     'aria-checked',
+    'aria-controls',
+    'aria-current',
+    'aria-describedby',
     'aria-disabled',
     'aria-expanded',
+    'aria-haspopup',
+    'aria-hidden',
+    'aria-invalid',
     'aria-label',
     'aria-labelledby',
+    'aria-modal',
     'aria-pressed',
     'aria-selected',
+    'aria-valuemax',
+    'aria-valuemin',
+    'aria-valuenow',
+    'aria-valuetext',
     'autocomplete',
+    'class',
+    'checked',
+    'cols',
     'contenteditable',
+    'controls',
     'data-ad-client',
     'data-ad-slot',
+    'data-chart-data',
+    'data-chart-type',
+    'data-current',
+    'data-max',
+    'data-page',
+    'data-per-page',
+    'data-rating',
     'data-src',
+    'data-subtitle',
     'data-testid',
+    'data-title',
+    'data-total',
+    'data-total-pages',
+    'data-total-rows',
     'disabled',
     'download',
     'enctype',
     'height',
     'href',
+    'id',
+    'kind',
+    'label',
     'loading',
+    'max',
     'maxlength',
     'method',
+    'min',
     'multiple',
     'name',
+    'open',
     'pattern',
     'placeholder',
+    'poster',
+    'readonly',
     'referrerpolicy',
+    'rel',
     'required',
     'role',
+    'rows',
     'sandbox',
     'slot',
     'src',
     'srcdoc',
+    'srclang',
+    'step',
     'tabindex',
     'target',
     'title',
     'type',
     'value',
-    'max',
     'width',
   ]);
 
@@ -682,6 +854,475 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     }
     return true;
   };
+  const cssNumber = (value: string | null | undefined): number | undefined => {
+    if (!value) return undefined;
+    const parsed = Number(String(value).replace(/[^\d.-]+/g, ''));
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  const cssPixels = (value: string | null | undefined): number | undefined => {
+    const parsed = cssNumber(value);
+    return parsed === undefined ? undefined : Math.round(parsed);
+  };
+  const compactText = (value: string | undefined): string => (value ?? '').toLowerCase();
+  const classSignal = (el: HTMLElement): string =>
+    `${el.id} ${el.className} ${el.getAttribute('data-testid') ?? ''} ${el.getAttribute('data-title') ?? ''} ${el.getAttribute('aria-label') ?? ''}`.toLowerCase();
+  const hasSignal = (el: HTMLElement, pattern: RegExp): boolean => pattern.test(classSignal(el));
+  const isClickable = (el: HTMLElement, style?: CSSStyleDeclaration): boolean =>
+    el instanceof HTMLButtonElement ||
+    el instanceof HTMLAnchorElement ||
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLSelectElement ||
+    el instanceof HTMLTextAreaElement ||
+    el.hasAttribute('onclick') ||
+    el.getAttribute('role') === 'button' ||
+    el.getAttribute('tabindex') === '0' ||
+    style?.cursor === 'pointer';
+  const computedInfo = (style: CSSStyleDeclaration): TraversedNode['computed'] => {
+    const fontWeightValue = Number(style.fontWeight);
+    return localDropUndefined({
+      display: style.display,
+      cursor: style.cursor,
+      font_weight: Number.isFinite(fontWeightValue) ? fontWeightValue : /bold/i.test(style.fontWeight) ? 700 : undefined,
+      font_size_px: cssPixels(style.fontSize),
+      background_color: style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)' ? style.backgroundColor : undefined,
+      border_radius_px: cssPixels(style.borderTopLeftRadius),
+      padding_px: Math.max(
+        cssPixels(style.paddingTop) ?? 0,
+        cssPixels(style.paddingRight) ?? 0,
+        cssPixels(style.paddingBottom) ?? 0,
+        cssPixels(style.paddingLeft) ?? 0
+      ) || undefined,
+      gap_px: cssPixels(style.gap),
+    });
+  };
+  const descendantCount = (el: HTMLElement, selector: string): number => el.querySelectorAll(selector).length;
+  const domInfo = (el: HTMLElement, entryContext: any): TraversedNode['dom'] => {
+    const form = el.closest('form');
+    const previousLabel = el.previousElementSibling instanceof HTMLLabelElement
+      ? normalizeText(el.previousElementSibling.textContent, 160)
+      : undefined;
+    return localDropUndefined({
+      id: el.id || undefined,
+      classes: Array.from(el.classList).slice(0, 20),
+      child_element_count: el.childElementCount,
+      depth: Math.max(0, elPathDepth(el)),
+      descendant_interactive_count: descendantCount(el, 'a, button, input, select, textarea, [role="button"], [tabindex="0"], [onclick]'),
+      descendant_image_count: descendantCount(el, 'img, picture, svg, canvas, video'),
+      descendant_link_count: descendantCount(el, 'a[href], [role="link"]'),
+      nearest_form_id: form instanceof HTMLElement ? getSemanticId(form, entryContext) : undefined,
+      previous_label: previousLabel,
+    });
+  };
+  const elPathDepth = (el: HTMLElement): number => {
+    let depth = 0;
+    let current: HTMLElement | null = el.parentElement;
+    while (current) {
+      depth += 1;
+      current = current.parentElement;
+    }
+    return depth;
+  };
+  const fileFormat = (src: string | undefined): string | undefined => {
+    if (!src) return undefined;
+    const clean = src.split(/[?#]/)[0]?.toLowerCase() ?? '';
+    const match = clean.match(/\.([a-z0-9]+)$/);
+    return match?.[1];
+  };
+  const mediaTracks = (el: HTMLMediaElement): TraversedNode['media'] extends infer T
+    ? T extends { tracks?: infer K } ? K : never
+    : never => Array.from(el.querySelectorAll('track')).slice(0, 12).map((track) => localDropUndefined({
+      kind: track.getAttribute('kind') || undefined,
+      label: track.getAttribute('label') || undefined,
+      src: track.getAttribute('src') || undefined,
+      srclang: track.getAttribute('srclang') || undefined,
+    }));
+  const extractMedia = (
+    el: HTMLElement,
+    tagName: string,
+    rect: DOMRect,
+    style: CSSStyleDeclaration,
+    text?: string,
+    label?: string
+  ): TraversedNode['media'] | undefined => {
+    const contextText = normalizeText((el.closest('figure, article, section, li, div') as HTMLElement | null)?.innerText, 240);
+    if (el instanceof HTMLImageElement) {
+      const src = el.getAttribute('src') || el.currentSrc || undefined;
+      const width = Math.round(rect.width || el.naturalWidth || Number(el.getAttribute('width')) || 0) || undefined;
+      const height = Math.round(rect.height || el.naturalHeight || Number(el.getAttribute('height')) || 0) || undefined;
+      const alt = normalizeText(el.getAttribute('alt'), 240);
+      const decorative = el.getAttribute('role') === 'presentation' || el.getAttribute('aria-hidden') === 'true' || el.getAttribute('alt') === '';
+      const icon = Boolean(width && height && width < 32 && height < 32);
+      return localDropUndefined({
+        kind: 'image',
+        src,
+        current_src: el.currentSrc || undefined,
+        alt,
+        width,
+        height,
+        natural_width: el.naturalWidth || undefined,
+        natural_height: el.naturalHeight || undefined,
+        format: fileFormat(src),
+        loading: el.getAttribute('loading') || undefined,
+        clickable: Boolean(el.closest('a, button') || isClickable(el, style)),
+        decorative,
+        icon,
+        context: contextText,
+        vlm_status: alt && !/^image|img|photo|picture$/i.test(alt) ? 'not_needed' : 'not_configured',
+        ocr_status: 'not_configured',
+      });
+    }
+    if (el instanceof HTMLVideoElement) {
+      const src = el.currentSrc || el.getAttribute('src') || el.querySelector('source')?.getAttribute('src') || undefined;
+      return localDropUndefined({
+        kind: 'video',
+        src,
+        current_src: el.currentSrc || undefined,
+        sources: Array.from(el.querySelectorAll('source')).map((source) => source.getAttribute('src') || '').filter(Boolean).slice(0, 8),
+        width: Math.round(rect.width || el.videoWidth || Number(el.getAttribute('width')) || 0) || undefined,
+        height: Math.round(rect.height || el.videoHeight || Number(el.getAttribute('height')) || 0) || undefined,
+        duration: Number.isFinite(el.duration) ? Number(el.duration.toFixed(3)) : undefined,
+        controls: el.controls,
+        poster: el.getAttribute('poster') || undefined,
+        tracks: mediaTracks(el),
+        format: fileFormat(src),
+        media_state: {
+          current_time: Number(el.currentTime.toFixed(3)),
+          paused: el.paused,
+          ended: el.ended,
+          muted: el.muted,
+          volume: Number(el.volume.toFixed(2)),
+          playback_rate: Number(el.playbackRate.toFixed(2)),
+        },
+        vlm_status: 'not_configured',
+      });
+    }
+    if (el instanceof HTMLAudioElement) {
+      const src = el.currentSrc || el.getAttribute('src') || el.querySelector('source')?.getAttribute('src') || undefined;
+      return localDropUndefined({
+        kind: 'audio',
+        src,
+        current_src: el.currentSrc || undefined,
+        sources: Array.from(el.querySelectorAll('source')).map((source) => source.getAttribute('src') || '').filter(Boolean).slice(0, 8),
+        duration: Number.isFinite(el.duration) ? Number(el.duration.toFixed(3)) : undefined,
+        controls: el.controls,
+        tracks: mediaTracks(el),
+        format: fileFormat(src),
+        media_state: {
+          current_time: Number(el.currentTime.toFixed(3)),
+          paused: el.paused,
+          ended: el.ended,
+          muted: el.muted,
+          volume: Number(el.volume.toFixed(2)),
+          playback_rate: Number(el.playbackRate.toFixed(2)),
+        },
+      });
+    }
+    if (tagName === 'canvas') {
+      const chart = extractChartSummary(el, text, label);
+      const width = Math.round(rect.width || Number(el.getAttribute('width')) || 0) || undefined;
+      const height = Math.round(rect.height || Number(el.getAttribute('height')) || 0) || undefined;
+      const decorative = !chart && (el.getAttribute('aria-hidden') === 'true' || hasSignal(el, /\b(background|particle|confetti|decorative)\b/));
+      return localDropUndefined({
+        kind: chart ? 'chart' : 'canvas',
+        width,
+        height,
+        chart_type: chart?.chart_type,
+        data_summary: chart?.data_summary,
+        decorative,
+        has_bitmap: Boolean(width && height),
+        pixel_hash: fnv1a(`${width}x${height}:${el.getAttribute('data-chart-data') ?? ''}:${el.getAttribute('aria-label') ?? ''}`),
+        vlm_status: chart ? 'not_needed' : 'not_configured',
+        ocr_status: 'not_configured',
+      });
+    }
+    if (tagName === 'svg') {
+      const svg = el as unknown as SVGSVGElement;
+      const width = Math.round(rect.width || Number(el.getAttribute('width')) || 0) || undefined;
+      const height = Math.round(rect.height || Number(el.getAttribute('height')) || 0) || undefined;
+      const title = normalizeText(el.querySelector('title')?.textContent, 240);
+      const description = normalizeText(el.querySelector('desc')?.textContent, 320);
+      const textNodes = Array.from(el.querySelectorAll('text'))
+        .map((node) => normalizeText(node.textContent, 120))
+        .filter((value): value is string => Boolean(value))
+        .slice(0, 12);
+      const chart = extractChartSummary(el, title ?? text, description ?? label);
+      const icon = Boolean(width && height && width < 32 && height < 32 && !title && textNodes.length === 0);
+      const decorative = el.getAttribute('role') === 'presentation' || el.getAttribute('aria-hidden') === 'true';
+      return localDropUndefined({
+        kind: chart ? 'chart' : 'svg',
+        width,
+        height,
+        title,
+        description,
+        text_nodes: textNodes,
+        view_box: svg.getAttribute('viewBox') || undefined,
+        chart_type: chart?.chart_type,
+        data_summary: chart?.data_summary,
+        decorative,
+        icon,
+        vlm_status: title || description || textNodes.length > 0 ? 'not_needed' : 'not_configured',
+        ocr_status: 'not_configured',
+      });
+    }
+    return undefined;
+  };
+  const extractChartSummary = (el: HTMLElement, text?: string, label?: string): { chart_type?: string; data_summary?: string } | undefined => {
+    const signal = `${classSignal(el)} ${el.getAttribute('data-chart-type') ?? ''} ${el.getAttribute('data-chart-data') ?? ''}`.toLowerCase();
+    const chartLike = /\b(chart|graph|plot|sparkline|d3|chartjs|visualization|viz)\b/.test(signal);
+    if (!chartLike && !el.getAttribute('data-chart-data') && !el.getAttribute('aria-label')) return undefined;
+    const chartType = el.getAttribute('data-chart-type') || signal.match(/\b(line|bar|pie|area|scatter|sparkline|donut|heatmap)\b/)?.[1] || undefined;
+    const rawData = el.getAttribute('data-chart-data') || el.getAttribute('aria-label') || el.getAttribute('title') || text || label;
+    return localDropUndefined({
+      chart_type: chartType,
+      data_summary: normalizeText(rawData, 360) ?? (chartType ? `${chartType} chart` : 'Chart detected without readable data'),
+    });
+  };
+  const mediaIsNoise = (media: TraversedNode['media'] | undefined, el: HTMLElement): boolean => {
+    if (!media) return false;
+    if (media.kind === 'chart' || media.kind === 'video' || media.kind === 'audio') return false;
+    if (media.decorative) return true;
+    if (media.icon && !el.closest('button, a, [role="button"]')) return true;
+    return false;
+  };
+  const extractComponent = (
+    el: HTMLElement,
+    tagName: string,
+    role: string | null,
+    text?: string,
+    label?: string,
+    media?: TraversedNode['media']
+  ): TraversedNode['component'] | undefined => {
+    if (hasSignal(el, /\b(skeleton|shimmer|placeholder-loading|loading-placeholder|react-loading-skeleton)\b/)) {
+      return { kind: 'skeleton', title: label ?? text };
+    }
+    if (role === 'tablist' || hasSignal(el, /\b(tabs|tab-list|tablist|segmented-control)\b/)) {
+      return localDropUndefined({
+        kind: 'tab_group',
+        tabs: Array.from(el.querySelectorAll('[role="tab"], button, a')).slice(0, 20).map((tab) => {
+          const item = tab as HTMLElement;
+          return localDropUndefined({
+            id: getSemanticId(item),
+            label: normalizeText(item.innerText || item.textContent, 120) ?? item.getAttribute('aria-label') ?? item.id,
+            active: item.getAttribute('aria-selected') === 'true' || item.classList.contains('active'),
+            controls: item.getAttribute('aria-controls') || undefined,
+          });
+        }),
+        active_panel_id: el.querySelector('[role="tab"][aria-selected="true"]')?.getAttribute('aria-controls') || undefined,
+      });
+    }
+    if (isBreadcrumbElement(el, tagName, role)) return extractBreadcrumb(el);
+    if (isPaginationElement(el)) return extractPagination(el);
+    if (isAccordionElement(el, tagName)) return extractAccordion(el);
+    if (isCarouselElement(el)) return extractCarousel(el);
+    if (isRatingElement(el, text, label)) return extractRating(el, text, label);
+    if (isStepperElement(el)) return extractStepper(el);
+    if (media?.kind === 'chart' || hasSignal(el, /\b(chart|graph|plot|sparkline|visualization|viz)\b/)) {
+      return localDropUndefined({
+        kind: 'chart',
+        title: label ?? text,
+        items: media?.data_summary ? [{ data_summary: media.data_summary, chart_type: media.chart_type }] : undefined,
+      });
+    }
+    if (role === 'menu' || role === 'menubar' || hasSignal(el, /\b(menu|dropdown-menu|context-menu|command-palette)\b/)) {
+      return localDropUndefined({
+        kind: 'menu',
+        title: label ?? text,
+        items: Array.from(el.querySelectorAll('[role="menuitem"], a, button')).slice(0, 30).map((item) => {
+          const html = item as HTMLElement;
+          return localDropUndefined({
+            id: getSemanticId(html),
+            label: normalizeText(html.innerText || html.textContent, 120) ?? html.getAttribute('aria-label') ?? html.id,
+            disabled: html.getAttribute('aria-disabled') === 'true' || html.hasAttribute('disabled'),
+          });
+        }),
+      });
+    }
+    if (tagName === 'dialog' || role === 'dialog' || hasSignal(el, /\b(modal|dialog|overlay|drawer|lightbox|popover|sheet)\b/)) {
+      return localDropUndefined({
+        kind: hasSignal(el, /\b(modal|overlay|drawer|lightbox)\b/) || el.getAttribute('aria-modal') === 'true' ? 'modal' : 'dialog',
+        title: firstText(el, '[data-title], [aria-label], h1, h2, h3, .title, .modal-title, .dialog-title') ?? label ?? text,
+        actions: childActionIds(el),
+      });
+    }
+    if (hasSignal(el, /\b(badge|pill|tag|chip|status-label)\b/)) {
+      return { kind: 'badge', title: label ?? text };
+    }
+    if (isCardElement(el, text, label)) return extractCard(el, text, label);
+    if (tagName === 'nav') return extractNavigation(el, text, label);
+    return undefined;
+  };
+  const isBreadcrumbElement = (el: HTMLElement, tagName: string, role: string | null): boolean =>
+    tagName === 'nav' && /breadcrumb|crumb|trail/i.test(`${el.getAttribute('aria-label') ?? ''} ${el.className}`) ||
+    role === 'navigation' && /breadcrumb|crumb|trail/i.test(`${el.getAttribute('aria-label') ?? ''} ${el.className}`) ||
+    hasSignal(el, /\b(breadcrumb|breadcrumbs|crumbs|trail)\b/);
+  const isPaginationElement = (el: HTMLElement): boolean =>
+    hasSignal(el, /\b(pagination|pager|paginator|page-nav|pages)\b/) ||
+    (descendantCount(el, 'a[href], button') >= 3 && /\b(next|prev|previous|page)\b/i.test(el.innerText || ''));
+  const isAccordionElement = (el: HTMLElement, tagName: string): boolean =>
+    tagName === 'details' || hasSignal(el, /\b(accordion|collapse|collapsible|disclosure|faq-item|expander)\b/) ||
+    descendantCount(el, 'summary, [aria-expanded]') >= 2;
+  const isCarouselElement = (el: HTMLElement): boolean =>
+    hasSignal(el, /\b(carousel|slider|slideshow|swiper|glide|splide)\b/) ||
+    descendantCount(el, '[aria-roledescription="slide"], .slide, [data-slide]') >= 2;
+  const isRatingElement = (el: HTMLElement, text?: string, label?: string): boolean =>
+    hasSignal(el, /\b(rating|stars|star-rating|review-score|score-stars)\b/) ||
+    /[★☆]{2,}/.test(`${text ?? ''} ${label ?? ''}`) ||
+    /\bout of 5\b/i.test(`${text ?? ''} ${label ?? ''} ${el.getAttribute('aria-label') ?? ''}`);
+  const isStepperElement = (el: HTMLElement): boolean =>
+    hasSignal(el, /\b(stepper|steps|wizard|progress-steps|timeline-steps)\b/) ||
+    descendantCount(el, '[aria-current="step"], .step, [data-step]') >= 2;
+  const isCardElement = (el: HTMLElement, text?: string, label?: string): boolean => {
+    if (hasSignal(el, /\b(card|product-card|profile-card|news-card|article-card|tile|result-card|item-card|listing-item)\b/)) return true;
+    const content = `${text ?? ''} ${label ?? ''} ${el.innerText ?? ''}`;
+    return el.childElementCount >= 2 &&
+      content.length > 20 &&
+      (descendantCount(el, 'img, picture, svg, canvas') > 0 || descendantCount(el, 'a, button, [role="button"]') > 0) &&
+      /(\$|€|£|₴|\bprice\b|\bproduct\b|\barticle\b|\bprofile\b|\bread more\b|\badd to cart\b)/i.test(content);
+  };
+  const firstText = (el: HTMLElement, selector: string): string | undefined => {
+    const found = el.querySelector(selector) as HTMLElement | null;
+    if (!found) return undefined;
+    return normalizeText(found.getAttribute('data-title') || found.getAttribute('aria-label') || found.innerText || found.textContent, 180);
+  };
+  const childActionIds = (el: HTMLElement): string[] => Array.from(el.querySelectorAll('button, a[href], [role="button"], input[type="submit"]'))
+    .filter((item): item is HTMLElement => item instanceof HTMLElement)
+    .slice(0, 12)
+    .map((item) => getSemanticId(item));
+  const extractCard = (el: HTMLElement, text?: string, label?: string): TraversedNode['component'] => {
+    const image = el.querySelector('img, picture, svg, canvas') as HTMLElement | null;
+    return localDropUndefined({
+      kind: 'card',
+      title: el.getAttribute('data-title') || firstText(el, '[data-title], h1, h2, h3, h4, .title, .card-title, [class*="title"]') || label || text,
+      subtitle: el.getAttribute('data-subtitle') || firstText(el, '[data-subtitle], .subtitle, .card-subtitle, .description, [class*="subtitle"]'),
+      image_id: image ? getSemanticId(image) : undefined,
+      actions: childActionIds(el),
+    });
+  };
+  const extractPagination = (el: HTMLElement): TraversedNode['component'] => {
+    const controls = Array.from(el.querySelectorAll('a[href], button, [aria-current], [data-page]'))
+      .filter((item): item is HTMLElement => item instanceof HTMLElement)
+      .slice(0, 50);
+    const pages = controls.map((item) => {
+      const textValue = normalizeText(item.innerText || item.textContent || item.getAttribute('aria-label'), 80);
+      const pageNumber = numberFrom(item.getAttribute('data-page') || textValue);
+      const current = item.getAttribute('aria-current') === 'page' || item.classList.contains('active') || item.classList.contains('current');
+      return localDropUndefined({
+        id: getSemanticId(item),
+        label: textValue,
+        page: pageNumber,
+        url: item instanceof HTMLAnchorElement ? item.href : undefined,
+        current,
+        disabled: item.getAttribute('aria-disabled') === 'true' || item.hasAttribute('disabled'),
+      });
+    });
+    const numericPages = pages.map((page: any) => Number(page.page)).filter((page) => Number.isFinite(page));
+    const currentPage = (pages.find((page: any) => page.current) as any)?.page ?? numberFrom(el.getAttribute('data-current'));
+    const totalPages = numberFrom(el.getAttribute('data-total-pages')) ?? (numericPages.length ? Math.max(...numericPages) : undefined);
+    return localDropUndefined({
+      kind: 'pagination',
+      pages,
+      current: currentPage,
+      total: totalPages,
+      current_page: currentPage,
+      total_pages: totalPages,
+      has_next: controls.some((item) => /next|›|»/i.test(item.innerText || item.getAttribute('aria-label') || '')),
+      has_prev: controls.some((item) => /prev|previous|‹|«/i.test(item.innerText || item.getAttribute('aria-label') || '')),
+    });
+  };
+  const extractBreadcrumb = (el: HTMLElement): TraversedNode['component'] => {
+    const items = Array.from(el.querySelectorAll('a[href], li, [aria-current]'))
+      .filter((item): item is HTMLElement => item instanceof HTMLElement)
+      .slice(0, 30)
+      .map((item) => localDropUndefined({
+        id: getSemanticId(item),
+        label: normalizeText(item.innerText || item.textContent || item.getAttribute('aria-label'), 120),
+        url: item instanceof HTMLAnchorElement ? item.href : undefined,
+        active: item.getAttribute('aria-current') === 'page' || item.classList.contains('active'),
+      }))
+      .filter((item) => item.label || item.url);
+    return { kind: 'breadcrumb', items };
+  };
+  const extractAccordion = (el: HTMLElement): TraversedNode['component'] => {
+    const details = Array.from(el.matches('details') ? [el] : el.querySelectorAll('details, [aria-expanded]'))
+      .filter((item): item is HTMLElement => item instanceof HTMLElement)
+      .slice(0, 30);
+    const sections = details.map((item) => localDropUndefined({
+      id: getSemanticId(item),
+      title: firstText(item, 'summary, button, [class*="title"], [class*="header"]') || normalizeText(item.getAttribute('aria-label'), 120),
+      expanded: item instanceof HTMLDetailsElement ? item.open : item.getAttribute('aria-expanded') === 'true',
+      content_element_id: getSemanticId(item),
+    }));
+    return localDropUndefined({ kind: 'accordion', sections });
+  };
+  const extractCarousel = (el: HTMLElement): TraversedNode['component'] => {
+    const slides = Array.from(el.querySelectorAll('[aria-roledescription="slide"], .slide, [data-slide], [role="group"]'))
+      .filter((item): item is HTMLElement => item instanceof HTMLElement)
+      .slice(0, 30)
+      .map((item, index) => localDropUndefined({
+        id: getSemanticId(item),
+        index,
+        label: normalizeText(item.getAttribute('aria-label') || item.innerText || item.textContent, 160),
+        active: item.getAttribute('aria-hidden') === 'false' || item.classList.contains('active') || item.getAttribute('data-active') === 'true',
+      }));
+    return localDropUndefined({
+      kind: 'carousel',
+      slides,
+      current_slide: slides.find((slide: any) => slide.active)?.index ?? numberFrom(el.getAttribute('data-current-slide')),
+      actions: childActionIds(el),
+    });
+  };
+  const extractRating = (el: HTMLElement, text?: string, label?: string): TraversedNode['component'] => {
+    const source = `${el.getAttribute('aria-label') ?? ''} ${text ?? ''} ${label ?? ''}`;
+    const value = numberFrom(el.getAttribute('data-rating') || el.getAttribute('aria-valuenow')) ??
+      numberFrom(source.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:out of|\/)\s*([0-9]+)/i)?.[1]) ??
+      ((source.match(/★/g) ?? []).length || undefined);
+    const max = numberFrom(el.getAttribute('data-max') || el.getAttribute('aria-valuemax')) ??
+      numberFrom(source.match(/([0-9]+(?:\.[0-9]+)?)\s*(?:out of|\/)\s*([0-9]+)/i)?.[2]) ??
+      (/[★☆]/.test(source) ? 5 : undefined);
+    return localDropUndefined({
+      kind: 'rating',
+      title: label ?? text,
+      value,
+      max,
+      count: numberFrom(el.getAttribute('data-count') || source.match(/([0-9,]+)\s*(reviews?|ratings?)/i)?.[1]),
+    });
+  };
+  const extractStepper = (el: HTMLElement): TraversedNode['component'] => {
+    const steps = Array.from(el.querySelectorAll('[aria-current="step"], .step, [data-step], li'))
+      .filter((item): item is HTMLElement => item instanceof HTMLElement)
+      .slice(0, 40)
+      .map((item, index) => {
+        const current = item.getAttribute('aria-current') === 'step' || item.classList.contains('active') || item.classList.contains('current');
+        return localDropUndefined({
+          id: getSemanticId(item),
+          index: numberFrom(item.getAttribute('data-step')) ?? index + 1,
+          label: normalizeText(item.innerText || item.textContent || item.getAttribute('aria-label'), 120),
+          current,
+          completed: item.classList.contains('done') || item.classList.contains('complete') || item.getAttribute('data-complete') === 'true',
+        });
+      });
+    return localDropUndefined({
+      kind: 'stepper',
+      steps,
+      current: (steps.find((step: any) => step.current) as any)?.index,
+      total: steps.length || undefined,
+    });
+  };
+  const extractNavigation = (el: HTMLElement, text?: string, label?: string): TraversedNode['component'] => {
+    const items = Array.from(el.querySelectorAll('a[href], button'))
+      .filter((item): item is HTMLElement => item instanceof HTMLElement)
+      .slice(0, 50)
+      .map((item) => localDropUndefined({
+        id: getSemanticId(item),
+        label: normalizeText(item.innerText || item.textContent || item.getAttribute('aria-label'), 120),
+        url: item instanceof HTMLAnchorElement ? item.href : undefined,
+        active: item.getAttribute('aria-current') === 'page' || item.classList.contains('active'),
+        icon: Boolean(item.querySelector('svg, img')),
+      }));
+    const signal = classSignal(el);
+    const navType = /footer/.test(signal) ? 'footer' : /sidebar|side-nav/.test(signal) ? 'sidebar' : /pagination|pager/.test(signal) ? 'pagination' : 'main';
+    return localDropUndefined({ kind: 'navigation', title: label ?? text, nav_type: navType, items });
+  };
 
   const fnv1a = (str: string): string => {
     let hash = 2166136261;
@@ -692,10 +1333,11 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     return (hash >>> 0).toString(16);
   };
 
-  const actionTags = new Set(['a', 'button', 'details', 'form', 'input', 'label', 'option', 'select', 'summary', 'textarea']);
+  const actionTags = new Set(['a', 'area', 'button', 'details', 'form', 'input', 'label', 'option', 'select', 'summary', 'textarea']);
   const semanticTags = new Set([
     'article',
     'aside',
+    'audio',
     'canvas',
     'dialog',
     'figure',
@@ -721,14 +1363,21 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
   ]);
   const usefulRoles = new Set([
     'alert',
+    'alertdialog',
+    'article',
     'button',
     'checkbox',
     'combobox',
     'dialog',
     'grid',
+    'img',
     'link',
+    'list',
+    'listitem',
     'listbox',
+    'log',
     'menu',
+    'menubar',
     'menuitem',
     'navigation',
     'option',
@@ -736,10 +1385,14 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     'radio',
     'searchbox',
     'separator',
+    'slider',
+    'status',
     'switch',
     'tab',
     'tablist',
+    'tabpanel',
     'textbox',
+    'tooltip',
   ]);
 
   const shadowHosts = new Map<HTMLElement, { hostId: string; mode: 'open' | 'closed'; contentCount: number }>();
@@ -757,18 +1410,19 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
 
   const walk = (root: ParentNode, entryContext: any) => {
     for (const child of Array.from(root.children)) {
-      if (!(child instanceof HTMLElement)) continue;
-      const slotted = entryContext.lightShadowHostId && child.getAttribute('slot')
-        ? `shadow:${entryContext.lightShadowHostId}#slot:${child.getAttribute('slot') || 'default'}`
+      if (!(child instanceof HTMLElement) && !(child instanceof SVGElement)) continue;
+      const element = child as HTMLElement;
+      const slotted = entryContext.lightShadowHostId && element.getAttribute('slot')
+        ? `shadow:${entryContext.lightShadowHostId}#slot:${element.getAttribute('slot') || 'default'}`
         : entryContext.slottedIn;
       const childContext = { ...entryContext, slottedIn: slotted };
-      entries.push({ el: child, context: childContext });
+      entries.push({ el: element, context: childContext });
 
       let shadowHostId: string | undefined;
-      const shadow = shadowRootFor(child);
+      const shadow = shadowRootFor(element);
       if (shadow) {
-        shadowHostId = getSemanticId(child, childContext);
-        shadowHosts.set(child, {
+        shadowHostId = getSemanticId(element, childContext);
+        shadowHosts.set(element, {
           hostId: shadowHostId,
           mode: shadow.mode,
           contentCount: shadow.root.childElementCount,
@@ -847,11 +1501,17 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     const role = el.getAttribute('role');
     const textSource = ['input', 'select', 'textarea'].includes(tagName)
       ? undefined
-      : directText(el) ?? normalizeText(el.innerText, 240);
+      : directText(el) ?? normalizeText((el as any).innerText ?? el.textContent, 240);
     const label = accessibleLabel(el) ?? textSource;
     const shadow = shadowHosts.get(el);
+    const media = extractMedia(el, tagName, rect, style, textSource, label);
+    if (mediaIsNoise(media, el)) {
+      skippedNoise += 1;
+      continue;
+    }
+    const component = extractComponent(el, tagName, role, textSource, label, media);
 
-    if (!isMeaningful(el, tagName, role, textSource, label, Boolean(shadow), Boolean(iframe))) {
+    if (!isMeaningful(el, tagName, role, textSource, label, Boolean(shadow), Boolean(iframe), media, component)) {
       skippedNoise += 1;
       continue;
     }
@@ -933,6 +1593,10 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
       form: extractForm(el, getSemanticId),
       table: extractTable(el, normalizeText),
       list: extractList(el, normalizeText),
+      dom: domInfo(el, entryContext),
+      computed: computedInfo(style),
+      media,
+      component,
     }));
   }
 
@@ -976,13 +1640,17 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     text?: string,
     label?: string,
     hasShadow = false,
-    hasIframe = false
+    hasIframe = false,
+    media?: TraversedNode['media'],
+    component?: TraversedNode['component']
   ): boolean {
     if (hasShadow || hasIframe) return true;
+    if (component || media) return true;
     if (actionTags.has(tagName) || semanticTags.has(tagName)) return true;
     if (role && usefulRoles.has(role)) return true;
     if (el.hasAttribute('onclick') || el.getAttribute('tabindex') === '0') return true;
     if (el.isContentEditable) return true;
+    if (hasSignal(el, /\b(card|pagination|pager|breadcrumb|accordion|collapse|carousel|rating|stepper|skeleton|chart|graph|modal|dialog|badge|tooltip|tabs)\b/)) return true;
     return Boolean(label || text);
   }
 

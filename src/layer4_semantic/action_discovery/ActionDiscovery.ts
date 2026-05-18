@@ -26,7 +26,7 @@ export class ActionDiscovery {
             })
           );
         }
-      } else if (el.type === 'input') {
+      } else if (el.type === 'input' || el.type === 'textarea') {
         const inputType = el.input_type ?? 'text';
         if (inputType === 'file') {
           actions.push(
@@ -105,6 +105,32 @@ export class ActionDiscovery {
             })
           );
         }
+      } else if (el.type === 'pagination') {
+        for (const page of (el.pages ?? []).slice(0, 12)) {
+          if (page.disabled || page.current) continue;
+          actions.push(this.targeted(page.url ? 'navigate' : 'click', { ...el, id: page.id, label: page.label, url: page.url }, page.label || `Page ${page.page ?? ''}`, page.url ? { url: page.url } : undefined));
+        }
+      } else if (el.type === 'accordion') {
+        for (const section of (el.sections ?? []).slice(0, 12)) {
+          actions.push(this.targeted('click', { ...el, id: section.id, label: section.title }, section.expanded ? `Collapse ${section.title ?? 'section'}` : `Expand ${section.title ?? 'section'}`));
+        }
+      } else if (el.type === 'carousel') {
+        for (const actionId of (el.actions ?? []).slice(0, 4)) {
+          actions.push(this.targeted('click', { ...el, id: actionId }, el.label || 'Carousel control'));
+        }
+      } else if (el.type === 'video' || el.type === 'audio') {
+        actions.push(
+          this.targeted('media_control', el, el.label || `${el.type} controls`, {
+            schema: {
+              command: 'play|pause|seek|mute|unmute|set_volume|set_playback_rate|fullscreen?',
+              time_seconds: 'number?',
+              volume: 'number?',
+              rate: 'number?',
+            },
+          })
+        );
+      } else if (el.type === 'chart') {
+        actions.push(this.targeted('screenshot', el, el.label || el.data_summary || 'Capture chart', { element_id: el.id }));
       }
 
       if (el.in_viewport === false) {
