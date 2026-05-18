@@ -78,7 +78,7 @@ export class ElementClassifier {
       case 'listbox':
         return candidate('select', 0.94, 'aria', [`role:${role}`]);
       case 'dialog':
-        return candidate(attributes['aria-modal'] === 'true' || classText(node).includes('modal') ? 'modal' : 'dialog', 0.95, 'aria', ['role:dialog']);
+        return candidate(attributes['aria-modal'] === 'true' || classAndIdText(node).includes('modal') ? 'modal' : 'dialog', 0.95, 'aria', ['role:dialog']);
       case 'grid':
       case 'table':
         return candidate('table', 0.94, 'aria', [`role:${role}`]);
@@ -115,6 +115,8 @@ export class ElementClassifier {
         return candidate('tooltip', 0.96, 'aria', ['role:tooltip']);
       case 'article':
         return candidate('article', 0.92, 'aria', ['role:article']);
+      case 'heading':
+        return candidate('heading', 0.96, 'aria', ['role:heading']);
       default:
         return undefined;
     }
@@ -131,7 +133,15 @@ export class ElementClassifier {
         return candidate('heading', 0.99, 'tag', [`tag:${tagName}`]);
       case 'a':
       case 'area':
-        return attributes.href ? candidate('link', 0.98, 'tag', [`tag:${tagName}`, 'href']) : candidate('button', 0.82, 'heuristic', [`tag:${tagName}`, 'missing_href']);
+        if (attributes.href) {
+          // v2: Detect "heading links" — links that serve as titles/headings
+          // (e.g., HN post titles <a class="titleline">, article title links, etc.)
+          if (isHeadingLink(node, attributes)) {
+            return candidate('heading', 0.88, 'heuristic', ['tag:a', 'href', 'heading_link']);
+          }
+          return candidate('link', 0.98, 'tag', ['tag:a', 'href']);
+        }
+        return candidate('button', 0.82, 'heuristic', ['tag:a', 'missing_href']);
       case 'button':
       case 'summary':
         return candidate('button', 0.98, 'tag', [`tag:${tagName}`]);
@@ -196,7 +206,8 @@ export class ElementClassifier {
   }
 
   private classifyByHeuristic(node: any, attributes: Record<string, string>): Candidate | undefined {
-    const classes = classText(node);
+    // v2: Use classAndIdText for CSS class matching (NOT label — prevents contamination)
+    const classes = classAndIdText(node);
     const allText = joinedSignals(node, attributes);
     const role = normalize(node.role ?? attributes.role);
     const tagName = normalize(node.tagName);
@@ -226,6 +237,9 @@ export class ElementClassifier {
     if (node.media?.kind === 'chart') return candidate('chart', 0.88, 'heuristic', ['media:chart']);
 
     const classRules: Array<{ type: ElementType; pattern: RegExp; confidence: number; signal: string }> = [
+      // v2: Added heading-link class patterns before generic card/modal
+      { type: 'heading', pattern: /\b(titleline|storylink|headline|post-title|entry-title|article-title|page-title|section-title)\b/, confidence: 0.90, signal: 'class:heading_link' },
+      { type: 'card', pattern: /\b(athing|post|story-item|feed-item|list-item|search-result)\b/, confidence: 0.88, signal: 'class:post_card' },
       { type: 'skeleton', pattern: /\b(skeleton|shimmer|placeholder-loading|loading-placeholder|react-loading-skeleton)\b/, confidence: 0.94, signal: 'class:skeleton' },
       { type: 'breadcrumb', pattern: /\b(breadcrumb|breadcrumbs|crumbs|trail)\b/, confidence: 0.93, signal: 'class:breadcrumb' },
       { type: 'pagination', pattern: /\b(pagination|pager|page-nav|pages|paginator)\b/, confidence: 0.92, signal: 'class:pagination' },
@@ -238,7 +252,7 @@ export class ElementClassifier {
       { type: 'modal', pattern: /\b(modal|overlay|drawer|lightbox)\b/, confidence: 0.86, signal: 'class:modal' },
       { type: 'dialog', pattern: /\b(dialog|popover|sheet)\b/, confidence: 0.84, signal: 'class:dialog' },
       { type: 'menu', pattern: /\b(menu|dropdown-menu|context-menu|command-palette)\b/, confidence: 0.84, signal: 'class:menu' },
-      { type: 'badge', pattern: /\b(badge|pill|tag|chip|label|status)\b/, confidence: 0.82, signal: 'class:badge' },
+      { type: 'badge', pattern: /\b(badge|pill|tag|chip|status)\b/, confidence: 0.82, signal: 'class:badge' },
       { type: 'tooltip', pattern: /\b(tooltip|popover-content|hint)\b/, confidence: 0.82, signal: 'class:tooltip' },
       { type: 'tab_group', pattern: /\b(tabs|tab-list|tablist|segmented-control)\b/, confidence: 0.82, signal: 'class:tabs' },
     ];
@@ -273,8 +287,22 @@ export class ElementClassifier {
     const fontSize = Number(computed.font_size_px ?? 0);
     const fontWeight = Number(computed.font_weight ?? 0);
     if (tagName === 'div' || tagName === 'span' || tagName === 'p') {
-      if (text.length >= 3 && text.length <= 140 && (fontSize >= 20 || fontWeight >= 650)) {
-        return candidate('heading', fontSize >= 24 || fontWeight >= 700 ? 0.77 : 0.68, 'heuristic', ['style:heading']);
+      // v3: Stricter thresholds + navigation/interactive exclusions.
+      // Previous v2 (fontSize>=16 || fontWeight>=550) caused massive over-classification:
+      //   Wikipedia: "Main menu Search Donate Create account Log in" (fontWeight 600, many interactive children)
+      //   NYTimes: "SKIP ADVERTISEMENT" (bold text, skip link)
+      //   NYTimes: "U.S.INTERNATIONALCANADAESPAÑOL中文" (nav bar with bold text)
+      // These are NOT headings — they're navigation/interactive elements with bold styling.
+      const interactiveCount = Number(node.dom?.descendant_interactive_count ?? 0);
+      const isNavContext = /\b(nav|menu|toolbar|sidebar|footer|header|breadcrumb|pagination|skip|jump)\b/.test(classes);
+      const isSkipText = /^(skip|jump)\s/i.test(text);
+      const hasManyInteractive = interactiveCount >= 3;
+      // Only classify as heading if: not nav-like, not skip text, not dense interactive,
+      // AND meets stricter visual thresholds (fontSize>=20 OR fontWeight>=700)
+      if (!isNavContext && !isSkipText && !hasManyInteractive &&
+          text.length >= 3 && text.length <= 120 &&
+          (fontSize >= 20 || fontWeight >= 700)) {
+        return candidate('heading', fontSize >= 24 || fontWeight >= 800 ? 0.77 : 0.68, 'heuristic', ['style:heading']);
       }
     }
 
@@ -292,7 +320,7 @@ export class ElementClassifier {
   ): Candidate {
     const scores = new Map<ElementType, number>();
     const add = (type: ElementType, amount: number) => scores.set(type, (scores.get(type) ?? 0) + amount);
-    const classes = classText(node);
+    const classes = classAndIdText(node);
     const text = String(node.text ?? node.label ?? '');
     const tagName = normalize(node.tagName);
     const computed = node.computed ?? {};
@@ -351,6 +379,28 @@ function normalize(value: string | undefined): string | undefined {
   return value?.toLowerCase();
 }
 
+/**
+ * classAndIdText — ONLY class names and IDs, NOT label text.
+ * Used for CSS class-based matching (classRules, role classification).
+ * Label text can contain words like "modal", "card", "menu" that cause
+ * false-positive classRule matches (e.g., HN post from "modal.com" → modal).
+ */
+function classAndIdText(node: any): string {
+  const attributes = node.attributes ?? {};
+  const values = [
+    attributes.class,
+    attributes.id,
+    node.dom?.id,
+    Array.isArray(node.dom?.classes) ? node.dom.classes.join(' ') : undefined,
+  ];
+  return values.filter(Boolean).join(' ').toLowerCase();
+}
+
+/**
+ * classText — class names, IDs, AND label text.
+ * Used for structural detection (isBreadcrumbLike, etc.) where
+ * label context is meaningful. NOT used for classRules matching.
+ */
 function classText(node: any): string {
   const attributes = node.attributes ?? {};
   const values = [
@@ -365,7 +415,7 @@ function classText(node: any): string {
 
 function joinedSignals(node: any, attributes: Record<string, string>): string {
   return [
-    classText(node),
+    classAndIdText(node),
     attributes['aria-label'],
     attributes.title,
     attributes.name,
@@ -377,6 +427,34 @@ function joinedSignals(node: any, attributes: Record<string, string>): string {
     node.text,
     node.label,
   ].filter(Boolean).join(' ').toLowerCase();
+}
+
+/**
+ * isHeadingLink — Detect links that serve as headings/titles.
+ * A link is a heading-link when:
+ *   1. It has a title-related CSS class (titleline, storylink, headline, etc.)
+ *   2. It has prominent visual styling (large font or bold) with short text
+ *   3. It's inside a card-like structure and looks like the primary title
+ */
+function isHeadingLink(node: any, attributes: Record<string, string>): boolean {
+  const classes = classAndIdText(node);
+  const computed = node.computed ?? {};
+  const fontSize = Number(computed.font_size_px ?? 0);
+  const fontWeight = Number(computed.font_weight ?? 0);
+  const text = String(node.text ?? node.label ?? '').trim();
+
+  // Signal 1: Title-related CSS class
+  if (/\b(titleline|storylink|headline|post-title|entry-title|article-title|page-title|section-title|heading|post-link)\b/.test(classes)) {
+    return true;
+  }
+
+  // Signal 2: Prominent styling + short text (link acting as a heading)
+  // Larger threshold than generic heading detection: 18px or 600 weight
+  if (text.length >= 5 && text.length <= 200 && (fontSize >= 18 || fontWeight >= 600)) {
+    return true;
+  }
+
+  return false;
 }
 
 function isBreadcrumbLike(node: any, attributes: Record<string, string>): boolean {

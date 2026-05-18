@@ -1646,13 +1646,16 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     }
     const component = extractComponent(el, tagName, role, textSource, label, media);
 
-    if (!isMeaningful(el, tagName, role, textSource, label, Boolean(shadow), Boolean(iframe), media, component)) {
+    if (!isMeaningful(el, tagName, role, textSource, label, Boolean(shadow), Boolean(iframe), media, component, entryContext.type === 'shadow')) {
       skippedNoise += 1;
       continue;
     }
 
     semanticCandidates += 1;
-    const isHighPriority = Boolean(iframe) || Boolean(shadow);
+    // v3: Elements inside shadow roots (entryContext.type === 'shadow') should also
+    // be high priority so they survive the maxElements cap. Previously only shadow
+    // HOST elements were high priority, but shadow CONTENT elements were not.
+    const isHighPriority = Boolean(iframe) || Boolean(shadow) || entryContext.type === 'shadow';
     if (nodes.length >= maxElements && !isHighPriority) continue;
 
     const id = getSemanticId(el, entryContext);
@@ -1782,8 +1785,12 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     hasShadow = false,
     hasIframe = false,
     media?: TraversedNode['media'],
-    component?: TraversedNode['component']
+    component?: TraversedNode['component'],
+    isInsideShadow = false
   ): boolean {
+    // v3: Elements inside shadow roots are always meaningful — they represent
+    // content that would otherwise be invisible to the LLM agent.
+    if (isInsideShadow) return true;
     if (hasShadow || hasIframe) return true;
     if (component || media) return true;
     if (actionTags.has(tagName) || semanticTags.has(tagName)) return true;
