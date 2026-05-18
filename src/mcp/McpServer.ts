@@ -28,6 +28,7 @@ import { ActionExecutor } from '../layer2_action_execution/ActionExecutor';
 import { SemanticLayer } from '../layer4_semantic/SemanticLayer';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { createDefaultPluginRegistry } from '../plugins/PluginRegistry';
+import { SemanticSnapshot } from '../common/types';
 import { randomUUID } from 'crypto';
 
 export class McpServer {
@@ -38,6 +39,7 @@ export class McpServer {
   private semanticLayer: SemanticLayer;
   private activeSessionId: string | null = null;
   private initialized = false;
+  private lastSnapshots: Map<string, SemanticSnapshot> = new Map();
 
   constructor() {
     this.browserCore = new BrowserCore();
@@ -94,6 +96,14 @@ export class McpServer {
                 type: 'string',
                 enum: ['compact', 'standard', 'detailed'],
                 description: 'Detail level: compact (minimal), standard (default), detailed (all fields)',
+              },
+              from_snapshot_id: {
+                type: 'string',
+                description: 'ID of the last snapshot received. Used to generate a delta.',
+              },
+              delta_only: {
+                type: 'boolean',
+                description: 'If true, returns only the delta operations instead of the full elements array (saves tokens).',
               },
             },
           },
@@ -224,11 +234,22 @@ export class McpServer {
   private async handleSnapshot(args: {
     max_elements?: number;
     snapshot_mode?: 'compact' | 'standard' | 'detailed';
+    from_snapshot_id?: string;
+    delta_only?: boolean;
   }): Promise<any> {
     const sessionId = await this.ensureSession();
     const page = this.browserCore.getPage(sessionId);
     const tabs = await this.browserCore.listTabs(sessionId);
     const tabId = this.browserCore.getActiveTabId(sessionId);
+
+    let previousSnapshot: SemanticSnapshot | undefined;
+    if (args.from_snapshot_id) {
+       const cached = this.lastSnapshots.get(sessionId);
+       // Simple version check: if the requested ID matches what we sent last time
+       if (cached && cached.snapshot_id === args.from_snapshot_id) {
+           previousSnapshot = cached;
+       }
+    }
 
     const snapshot = await this.semanticLayer.createSnapshot(page, {
       session: {
@@ -239,9 +260,36 @@ export class McpServer {
         cookies_count: 0,
       },
       maxElements: args.max_elements,
+      previousSnapshot,
     });
 
-    // For MCP clients, strip large binary data from snapshot
+    // Save for next delta request
+    this.lastSnapshots.set(sessionId, snapshot);
+
+    if (args.delta_only && snapshot.delta) {
+       // Return conservative update
+       const deltaResponse: any = {
+          snapshot_id: snapshot.snapshot_id,
+          version: snapshot.version,
+          url: snapshot.url,
+          title: snapshot.title,
+          timestamp: snapshot.timestamp,
+          delta: snapshot.delta,
+       };
+       if (snapshot.delta.stats.actions_changed) {
+          deltaResponse.available_actions = snapshot.available_actions;
+       }
+       return {
+         content: [
+           {
+             type: 'text',
+             text: JSON.stringify(deltaResponse, null, 2),
+           },
+         ],
+       };
+    }
+
+    // For MCP clients, strip large binary data from full snapshot
     const cleanSnapshot = {
       ...snapshot,
       elements: snapshot.elements.map((el) => {

@@ -5,6 +5,8 @@ import { ElementClassifier } from './classifier/ElementClassifier';
 import { SnapshotDiffer } from './diff/SnapshotDiffer';
 import { ContentExtractor } from './extractor/ContentExtractor';
 import { DOMTraverser } from './traverser/DOMTraverser';
+import { IncrementalUpdater } from './diff/IncrementalUpdater';
+import { SmartWait } from './stabilization/SmartWait';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { SemanticElement, SemanticSnapshot, SessionInfo, SnapshotMeta } from '../common/types';
 import { globalEventBus } from '../common/EventBus';
@@ -43,6 +45,8 @@ export class SemanticLayer {
   private differ: SnapshotDiffer;
   private pluginRegistry: PluginRegistry;
   private authTracker: AuthTracker;
+  private incrementalUpdater: IncrementalUpdater;
+  private smartWait: SmartWait;
 
   constructor(dependencies: SemanticLayerDependencies = {}) {
     const config = ConfigurationManager.getInstance().getConfig();
@@ -53,17 +57,29 @@ export class SemanticLayer {
     this.differ = dependencies.differ ?? new SnapshotDiffer();
     this.pluginRegistry = dependencies.pluginRegistry ?? createDefaultPluginRegistry(config.plugin_registry);
     this.authTracker = dependencies.authTracker ?? new AuthTracker();
+    this.incrementalUpdater = new IncrementalUpdater(this.traverser, this.classifier, this.extractor);
+    this.smartWait = new SmartWait();
   }
 
   async createSnapshot(page: Page, options: SnapshotBuildOptions): Promise<SemanticSnapshot> {
     const extractionStart = performance.now();
+
+    const incremental = this.incrementalUpdater.getSnapshot(options.session.session_id);
+    // In a full implementation, we'd use StateReconciler here to verify validity.
+    // For now, if we have a valid patched snapshot and we're not forcing a full refresh, we could return it.
+    // To ensure safety, we still do a full snap if plugins require it, but we register the new snap.
+
     await this.stabilizePage(page);
     try {
-      return await this.createSnapshotOnce(page, options, extractionStart);
+      const snap = await this.createSnapshotOnce(page, options, extractionStart);
+      this.incrementalUpdater.registerSession(options.session.session_id, page, snap);
+      return snap;
     } catch (error) {
       if (!isNavigationContextError(error)) throw error;
       await this.stabilizePage(page, true);
-      return this.createSnapshotOnce(page, options, extractionStart);
+      const snap = await this.createSnapshotOnce(page, options, extractionStart);
+      this.incrementalUpdater.registerSession(options.session.session_id, page, snap);
+      return snap;
     }
   }
 
@@ -247,10 +263,13 @@ export class SemanticLayer {
   }
 
   private async stabilizePage(page: Page, retry = false): Promise<void> {
-    const config = ConfigurationManager.getInstance().getConfig().semantic;
-    await page.waitForLoadState('domcontentloaded', { timeout: retry ? 3000 : 1000 }).catch(() => undefined);
-    await page.waitForLoadState('networkidle', { timeout: retry ? 3000 : 1000 }).catch(() => undefined);
-    await page.waitForTimeout(config.stabilization_ms);
+    const sessionId = undefined; // Will be passed when integrated with session tracking
+    await this.smartWait.waitForStability(page, {
+      retry,
+      sessionId,
+      hardTimeoutMs: retry ? 3000 : 5000,
+      mutationQuietMs: 300,
+    });
   }
 }
 

@@ -200,6 +200,31 @@ export class DOMTraverser {
 
     return mergeResults([main, ...frameResults], frameDescriptors);
   }
+
+  async traverseNode(page: Page, targetSelector: string): Promise<TraversalResult> {
+    const semanticConfig = ConfigurationManager.getInstance().getConfig().semantic;
+    const runtimeConfig = {
+      ...semanticConfig,
+      include_shadow_dom: semanticConfig.include_shadow_dom !== false,
+      include_iframes: semanticConfig.include_iframes !== false,
+      max_frame_depth: Math.max(0, Number(semanticConfig.max_frame_depth ?? 3)),
+    };
+
+    const mainFrame = page.mainFrame();
+    const result = await mainFrame.evaluate(evaluateDom, {
+      config: runtimeConfig,
+      context: {
+        type: 'main',
+        origin: 'main',
+        idPrefix: '',
+        rootParentId: undefined,
+        frameDepth: 0,
+        targetSelector,
+      },
+    });
+    
+    return result;
+  }
 }
 
 function mergeResults(results: TraversalResult[], frameDescriptors: FrameDescriptor[]): TraversalResult {
@@ -754,7 +779,17 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     }
   };
 
-  walk(document.body ?? document.documentElement, rootContext);
+  if (rootContext.targetSelector) {
+    const targetEl = document.querySelector(`[data-llm-browser-id="${rootContext.targetSelector}"]`) || document.querySelector(rootContext.targetSelector);
+    if (targetEl && targetEl.parentNode) {
+      // Walk the target element itself by passing its parent and filtering in the walk,
+      // or just add it to entries. For simplicity, if we have a target, we just want it and its subtree.
+      entries.push({ el: targetEl as HTMLElement, context: rootContext });
+      walk(targetEl, rootContext);
+    }
+  } else {
+    walk(document.body ?? document.documentElement, rootContext);
+  }
 
   const hardLimit = Math.max(1, Number(config.max_elements_hard_limit ?? config.max_elements));
   const requestedMax = config.max_elements_override === undefined ? undefined : Math.max(1, Number(config.max_elements_override));

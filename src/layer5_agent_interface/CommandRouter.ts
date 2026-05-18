@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { BrowserCore } from '../layer1_browser_core/BrowserCore';
 import { ActionExecutor, ActionExecutionResult } from '../layer2_action_execution/ActionExecutor';
+import { ActionValidator } from '../layer2_action_execution/ActionValidator';
 import { StateManagementLayer } from '../layer3_state_management/StateManagementLayer';
 import { SemanticLayer } from '../layer4_semantic/SemanticLayer';
 import { globalMetrics } from '../common/MetricsRegistry';
@@ -174,7 +175,8 @@ export class CommandRouter {
     private semanticLayer: SemanticLayer,
     private previousSnapshots: Map<string, SemanticSnapshot>,
     private securityPolicy = new SecurityPolicy(stateManager),
-    private ops = new OpStore<CommandResult>()
+    private ops = new OpStore<CommandResult>(),
+    private actionValidator = new ActionValidator()
   ) {}
 
   async execute(command: AgentCommand): Promise<RouterResult> {
@@ -338,6 +340,33 @@ export class CommandRouter {
       });
 
       globalMetrics.increment('llm_browser_actions_total');
+
+      // Semantic pre-flight validation (Concept 2.5.3)
+      if (activeAction.executionAction !== 'snapshot') {
+        const active = activeTab(this.stateManager.getSessionState(command.session_id));
+        const previousSnapshot = active ? this.previousSnapshots.get(snapKey(command.session_id, active.tab_id)) : undefined;
+        const validation = this.traceSync(
+          traceId,
+          'validator.preflight',
+          { action: activeAction.executionAction, target_id: activeAction.targetId },
+          () => this.actionValidator.validate(
+            activeAction.executionAction,
+            activeAction.targetId,
+            activeAction.params,
+            previousSnapshot
+          )
+        );
+        if (!validation.valid) {
+          throw new LlmBrowserError(
+            validation.error!.code as any,
+            validation.error!.message,
+            {
+              suggestion: validation.error!.suggestion,
+              ...validation.error!.context,
+            }
+          );
+        }
+      }
 
       if (activeAction.executionAction !== 'snapshot') {
         execution = await this.traceAsync(

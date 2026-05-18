@@ -1,6 +1,10 @@
 import { Page } from 'playwright';
 import { globalEventBus } from '../common/EventBus';
 import { ActionRecord, SessionState, TabState } from '../common/types';
+import { HistoryTracker } from './trackers/HistoryTracker';
+import { NetworkTracker } from './trackers/NetworkTracker';
+import { IntersectionTracker } from './trackers/IntersectionTracker';
+import { FormTracker } from './trackers/FormTracker';
 
 export class StateManagementLayer {
   private sessions: Map<string, SessionState> = new Map();
@@ -30,6 +34,14 @@ export class StateManagementLayer {
       viewport: initial.viewport,
     });
     this.actionHistory.set(sessionId, []);
+  }
+
+  public async injectAllTrackers(page: Page, sessionId: string) {
+    await this.injectMutationObserver(page, sessionId);
+    await HistoryTracker.inject(page, sessionId);
+    NetworkTracker.inject(page, sessionId);
+    await IntersectionTracker.inject(page, sessionId);
+    await FormTracker.inject(page, sessionId);
   }
 
   public async injectMutationObserver(page: Page, sessionId: string) {
