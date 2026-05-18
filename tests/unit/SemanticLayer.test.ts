@@ -146,6 +146,7 @@ function traversal(
       max_elements: stats.max_elements ?? 300,
       max_elements_requested: stats.max_elements_requested,
       iframe_count: 0,
+      iframe_in_output_count: 0,
       iframe_extracted_count: 0,
       iframe_skipped_ads: 0,
       iframe_depth_limited: 0,

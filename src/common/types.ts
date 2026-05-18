@@ -97,6 +97,7 @@ export interface SnapshotMeta {
   viewport?: ViewportState;
   encapsulation?: {
     iframe_count: number;
+    iframe_in_output_count?: number;
     iframe_extracted_count: number;
     iframe_skipped_ads: number;
     iframe_depth_limited: number;

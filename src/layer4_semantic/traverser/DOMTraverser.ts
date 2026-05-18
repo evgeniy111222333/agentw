@@ -91,6 +91,7 @@ export interface TraversalResult {
     max_elements: number;
     max_elements_requested?: number;
     iframe_count: number;
+    iframe_in_output_count: number;
     iframe_extracted_count: number;
     iframe_skipped_ads: number;
     iframe_depth_limited: number;
@@ -222,6 +223,7 @@ function mergeResults(results: TraversalResult[], frameDescriptors: FrameDescrip
     max_elements: maxElements,
     max_elements_requested: first?.stats.max_elements_requested,
     iframe_count: total.iframe_count + result.stats.iframe_count,
+    iframe_in_output_count: total.iframe_in_output_count + result.stats.iframe_in_output_count,
     iframe_extracted_count: total.iframe_extracted_count + (result === first ? 0 : 1),
     iframe_skipped_ads: total.iframe_skipped_ads + result.stats.iframe_skipped_ads,
     iframe_depth_limited: total.iframe_depth_limited + result.stats.iframe_depth_limited,
@@ -239,6 +241,7 @@ function mergeResults(results: TraversalResult[], frameDescriptors: FrameDescrip
     max_elements: maxElements,
     max_elements_requested: first?.stats.max_elements_requested,
     iframe_count: 0,
+    iframe_in_output_count: 0,
     iframe_extracted_count: 0,
     iframe_skipped_ads: 0,
     iframe_depth_limited: 0,
@@ -799,7 +802,8 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     }
 
     semanticCandidates += 1;
-    if (nodes.length >= maxElements) continue;
+    const isHighPriority = Boolean(iframe) || Boolean(shadow);
+    if (nodes.length >= maxElements && !isHighPriority) continue;
 
     const id = getSemanticId(el, entryContext);
     const parent = el.parentElement?.closest(`[${semanticIdAttr}], [id]`);
@@ -876,6 +880,7 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
       max_elements: maxElements,
       max_elements_requested: requestedMax,
       iframe_count: iframeCount,
+      iframe_in_output_count: nodes.filter(n => n.iframe).length,
       iframe_extracted_count: 0,
       iframe_skipped_ads: iframeSkippedAds,
       iframe_depth_limited: 0,
