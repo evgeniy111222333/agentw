@@ -5,6 +5,52 @@ import { globalEventBus } from '../common/EventBus';
 import { FlowStep, FlowStepResult, PAR_ACTIONS, assertSteps, report, stepParams, stepTarget } from '../flow/Flow';
 import { Box } from '../file/Box';
 import { globalSemCache } from '../cache/Sem';
+import { classifyActionError, shouldRetry, retryDelay, LlmBrowserError, RETRY_CONFIG } from '../common/errors';
+import { OpStore } from '../op/Op';
+import { globalMetrics } from '../common/MetricsRegistry';
+
+/**
+ * Concept §5.5: Risk scores per action (0-100).
+ */
+const ACTION_RISK_SCORE: Record<string, number> = {
+  snapshot: 0, wait: 0, wait_for: 0, poll: 0, scroll: 5, scroll_to_element: 5,
+  hover: 5, keyboard: 10, click: 10, type: 15, select: 15, go_back: 10, go_forward: 10,
+  list_tabs: 0, set_viewport: 5, invalidate_cache: 10,
+  navigate: 30, submit: 40, fill_form: 35, search_and_paginate: 25,
+  multi_click: 20, sequence: 30, parallel: 25, 'if': 10, loop: 20,
+  fill_and_verify: 35, navigate_and_extract: 35, login_flow: 75,
+  async_navigate: 30, cancel: 15, interact: 20,
+  upload: 40, download: 40, screenshot: 5, screenshot_file: 10, pdf: 15,
+  fs: 30, refresh: 15, open_tab: 10, new_tab: 10, switch_tab: 5, close_tab: 15,
+  define_script: 5, call_script: 30, 'try': 20,
+};
+
+/**
+ * Concept §5.8: ScriptRegistry — stores named, parameterized action sequences.
+ */
+class ScriptRegistry {
+  private scripts = new Map<string, { steps: FlowStep[]; params: string[] }>();
+
+  define(name: string, steps: FlowStep[], params: string[] = []): void {
+    if (this.scripts.size >= 100) throw new Error('Script registry full (max 100)');
+    this.scripts.set(name, { steps, params });
+  }
+
+  get(name: string): { steps: FlowStep[]; params: string[] } | undefined {
+    return this.scripts.get(name);
+  }
+
+  list(): string[] {
+    return [...this.scripts.keys()];
+  }
+
+  /** Replace {{param}} placeholders in step params */
+  instantiate(steps: FlowStep[], args: Record<string, any>): FlowStep[] {
+    return substituteTemplate(steps, args) as FlowStep[];
+  }
+}
+
+export { ACTION_RISK_SCORE };
 
 export interface ActionExecutionResult {
   action: string;
@@ -14,11 +60,20 @@ export interface ActionExecutionResult {
 }
 
 export class ActionExecutor {
+  private scripts = new ScriptRegistry();
+  private opStore = new OpStore();
+
   constructor(
     private browserCore: BrowserCore,
     private box = new Box()
   ) {}
 
+  /** Get risk score for an action (0-100). Concept §5.2.2 / §8.4. */
+  static riskScore(action: string): number {
+    return ACTION_RISK_SCORE[action] ?? 50;
+  }
+
+  /** Concept §5.5: Execute with automatic retry based on error classification. */
   async executeAction(
     sessionId: string,
     action: string,
@@ -28,28 +83,84 @@ export class ActionExecutor {
   ): Promise<ActionExecutionResult> {
     const page = this.browserCore.getPage(sessionId);
     const started = performance.now();
+    let lastError: any;
 
-    try {
-      const data = await this.dispatch(sessionId, page, action, targetId, params ?? {});
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const data = await this.dispatch(sessionId, page, action, targetId, params ?? {});
 
-      const result: ActionExecutionResult = {
-        action,
-        target_id: targetId,
-        duration_ms: Math.round(performance.now() - started),
-        data,
-      };
-      await globalEventBus.publish('action_completed', { session_id: sessionId, ...result });
-      return result;
-    } catch (error: any) {
-      const duration_ms = Math.round(performance.now() - started);
-      await globalEventBus.publish('action_failed', {
-        session_id: sessionId,
-        action,
-        target_id: targetId,
-        duration_ms,
-        error: error.message,
-      });
-      throw new Error(`Failed to execute action ${action}: ${error.message}`);
+        const result: ActionExecutionResult = {
+          action,
+          target_id: targetId,
+          duration_ms: Math.round(performance.now() - started),
+          data: {
+            ...data,
+            ...(attempt > 0 ? { attempts: attempt + 1 } : {}),
+          },
+        };
+        await globalEventBus.publish('action_completed', { session_id: sessionId, ...result });
+        if (attempt > 0) globalMetrics.increment('llm_browser_retries_succeeded_total');
+        return result;
+      } catch (error: any) {
+        lastError = error;
+        const { code, errorClass } = classifyActionError(error);
+
+        if (shouldRetry(errorClass, attempt)) {
+          const delay = retryDelay(errorClass, attempt);
+          const maxAttempts = RETRY_CONFIG[errorClass].maxAttempts;
+          globalMetrics.increment('llm_browser_retries_total');
+          const retryEvent = {
+            session_id: sessionId,
+            action,
+            target_id: targetId,
+            attempt: attempt + 1,
+            max_attempts: maxAttempts,
+            error_class: errorClass,
+            error_code: code,
+            error_message: error.message,
+            delay_ms: delay,
+            remaining: maxAttempts - attempt - 1,
+          };
+          await globalEventBus.publish('action_retry', retryEvent);
+          void globalEventBus.publish('stream_event', {
+            type: 'action_retry',
+            session_id: sessionId,
+            timestamp: new Date().toISOString(),
+            data: retryEvent,
+          });
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+
+        const duration_ms = Math.round(performance.now() - started);
+        await globalEventBus.publish('action_failed', {
+          session_id: sessionId,
+          action,
+          target_id: targetId,
+          duration_ms,
+          error: error.message,
+          error_code: code,
+          error_class: errorClass,
+          attempts: attempt + 1,
+        });
+        void globalEventBus.publish('stream_event', {
+          type: 'action_failed',
+          session_id: sessionId,
+          timestamp: new Date().toISOString(),
+          data: {
+            action,
+            target_id: targetId,
+            duration_ms,
+            error: error.message,
+            error_code: code,
+            error_class: errorClass,
+            attempts: attempt + 1,
+          },
+        });
+        throw new LlmBrowserError(code, `Failed to execute action ${action}: ${error.message}`, {
+          action, target_id: targetId, attempts: attempt + 1, error_class: errorClass,
+        });
+      }
     }
   }
 
@@ -66,7 +177,10 @@ export class ActionExecutor {
     switch (action) {
       case 'navigate':
         if (!params.url) throw new Error('URL is required for navigate action');
-        await page.goto(params.url, { waitUntil: 'load' });
+        await page.goto(resolvePageUrl(page, String(params.url)), {
+          waitUntil: params.wait_until ?? params.waitUntil ?? 'load',
+          timeout: params.timeout_ms ?? params.timeout ?? 30000,
+        });
         await page.waitForLoadState('networkidle', { timeout: params.timeout_ms ?? 5000 }).catch(() => undefined);
         return { url: page.url() };
 
@@ -99,21 +213,24 @@ export class ActionExecutor {
       }
 
       case 'click': {
-        const locator = await this.resolveActionableLocator(page, targetId, action);
-        await locator.click({ timeout: params.timeout_ms ?? 5000 });
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        const clickOptions: any = { timeout: params.timeout_ms ?? 5000 };
+        if (params.button) clickOptions.button = params.button; // right, middle
+        if (params.click_count) clickOptions.clickCount = params.click_count; // dblclick=2
+        await locator.click(clickOptions);
         await this.shortStabilization(page);
         return;
       }
 
       case 'interact': {
-        const locator = await this.resolveActionableLocator(page, targetId, action);
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
         await locator.click({ timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
         return { interacted: true };
       }
 
       case 'type': {
-        const locator = await this.resolveActionableLocator(page, targetId, action);
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
         if (params.text === undefined) throw new Error('Text is required for type action');
         if (params.clear !== false) {
           await locator.fill(String(params.text), { timeout: params.timeout_ms ?? 5000 });
@@ -129,24 +246,27 @@ export class ActionExecutor {
       }
 
       case 'select': {
-        const locator = await this.resolveActionableLocator(page, targetId, action);
-        if (params.value === undefined || params.value === null || params.value === '') {
-          throw new Error('Value is required for select action');
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        if (params.value === undefined && params.label === undefined) {
+          throw new Error('Value or label is required for select action');
         }
-        const value = Array.isArray(params.value) ? params.value.map(String) : String(params.value);
-        await locator.selectOption(value, { timeout: params.timeout_ms ?? 5000 });
+        // Concept §5.2.2: support both value and label selection
+        const selectArg = params.label !== undefined
+          ? { label: String(params.label) }
+          : (Array.isArray(params.value) ? params.value.map(String) : String(params.value));
+        await locator.selectOption(selectArg, { timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
-        return { value: params.value };
+        return { value: params.value ?? params.label };
       }
 
       case 'submit': {
-        const locator = await this.resolveActionableLocator(page, targetId, action);
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
         await this.submitLocator(page, locator, params.timeout_ms ?? 5000);
         return { url: page.url() };
       }
 
       case 'hover': {
-        const locator = await this.resolveActionableLocator(page, targetId, action);
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
         await locator.hover({ timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
         return;
@@ -173,8 +293,7 @@ export class ActionExecutor {
         return { key: params.key };
 
       case 'wait':
-        await page.waitForTimeout(Math.min(Number(params.ms ?? 500), 10000));
-        return { waited_ms: Math.min(Number(params.ms ?? 500), 10000) };
+        return this.wait(page, params);
 
       case 'fill_form':
         return this.fillForm(sessionId, page, targetId, params, depth);
@@ -200,6 +319,36 @@ export class ActionExecutor {
       case 'search_and_paginate':
         return this.searchAndPaginate(sessionId, page, targetId, params, depth);
 
+      // Concept §5.6: New compound actions
+      case 'fill_and_verify':
+        return this.fillAndVerify(sessionId, page, targetId, params, depth);
+
+      case 'navigate_and_extract':
+        return this.navigateAndExtract(sessionId, page, params, depth);
+
+      case 'login_flow':
+        return this.loginFlow(sessionId, page, params, depth);
+
+      // Concept §5.7: Async actions
+      case 'async_navigate':
+        return this.asyncNavigate(sessionId, params);
+
+      case 'poll':
+        return this.pollOp(params);
+
+      case 'cancel':
+        return this.cancelOp(params);
+
+      // Concept §5.8: Script system
+      case 'try':
+        return this.tryCatch(sessionId, page, params, depth);
+
+      case 'define_script':
+        return this.defineScript(params);
+
+      case 'call_script':
+        return this.callScript(sessionId, page, params, depth);
+
       case 'upload':
         return this.upload(sessionId, page, targetId, params);
 
@@ -224,7 +373,7 @@ export class ActionExecutor {
           timeout: params.timeout_ms ?? 5000,
         };
         const buffer = targetId
-          ? await (await this.resolveActionableLocator(page, targetId, action)).screenshot(screenshotOptions)
+          ? await (await this.resolveActionableLocator(page, targetId, action, params)).screenshot(screenshotOptions)
           : await page.screenshot({
               ...screenshotOptions,
               fullPage: params.full_page !== false,
@@ -244,6 +393,11 @@ export class ActionExecutor {
         await this.shortStabilization(page);
         return { url: page.url() };
 
+      case 'go_forward':
+        await page.goForward({ waitUntil: 'load' });
+        await this.shortStabilization(page);
+        return { url: page.url() };
+
       case 'refresh':
         await page.reload({ waitUntil: 'load' });
         await this.shortStabilization(page);
@@ -251,6 +405,9 @@ export class ActionExecutor {
 
       case 'snapshot':
         return;
+
+      case 'noop':
+        return { skipped: true };
 
       case 'invalidate_cache':
         globalSemCache.clear();
@@ -262,6 +419,48 @@ export class ActionExecutor {
       default:
         throw new Error(`Unsupported action: ${action}`);
     }
+  }
+
+  private async wait(page: Page, params: any): Promise<Record<string, any>> {
+    const timeoutMs = Math.min(Number(params.timeout_ms ?? params.timeout ?? params.ms ?? 500), 120000);
+    const condition = params.condition;
+    if (!condition) {
+      const waited = Math.min(timeoutMs, 10000);
+      await page.waitForTimeout(waited);
+      return { waited_ms: waited };
+    }
+
+    if (typeof condition === 'string') {
+      switch (condition) {
+        case 'element_visible': {
+          const target = params.element_id ?? params.target_id;
+          if (!target) throw new Error('element_id is required for wait element_visible');
+          await (await this.locatorForAny(page, String(target))).waitFor({ state: 'visible', timeout: timeoutMs });
+          return { condition, matched: true, waited_ms: timeoutMs };
+        }
+        case 'element_hidden': {
+          const target = params.element_id ?? params.target_id;
+          if (!target) throw new Error('element_id is required for wait element_hidden');
+          await (await this.locatorForAny(page, String(target))).waitFor({ state: 'hidden', timeout: timeoutMs });
+          return { condition, matched: true, waited_ms: timeoutMs };
+        }
+        case 'navigation_complete':
+        case 'page_loaded':
+          await page.waitForLoadState('load', { timeout: timeoutMs }).catch(() => undefined);
+          return { condition, matched: true, waited_ms: timeoutMs };
+        case 'network_idle':
+          await page.waitForLoadState('networkidle', { timeout: timeoutMs });
+          return { condition, matched: true, waited_ms: timeoutMs };
+        default:
+          throw new Error(`Unsupported wait condition: ${condition}`);
+      }
+    }
+
+    return this.waitFor(page, {
+      condition,
+      timeout_ms: timeoutMs,
+      poll_interval_ms: params.poll_interval_ms,
+    });
   }
 
   private async fillForm(
@@ -320,8 +519,19 @@ export class ActionExecutor {
         duration_ms: Math.round(performance.now() - started),
       };
     } catch (error) {
-      if (params.rollback !== false) {
+      const onFailure = params.on_failure ?? (params.rollback !== false ? 'rollback' : 'fail');
+      if (onFailure === 'rollback') {
         await this.restoreFields(page, changed);
+      }
+      if (onFailure === 'continue') {
+        return {
+          ...report('fill_form', steps),
+          fields_filled: Object.keys(fields),
+          submitted: false,
+          partial: true,
+          error: (error as Error).message,
+          duration_ms: Math.round(performance.now() - started),
+        };
       }
       throw error;
     }
@@ -342,10 +552,11 @@ export class ActionExecutor {
     if (ids.length > 50) throw new Error('multi_click exceeds max 50');
 
     const steps: FlowStepResult[] = [];
+    const continueOnError = params.on_failure === 'continue' || (params.on_failure === undefined && params.continue_on_error !== false);
     for (const id of ids) {
       const step = await this.runStep(sessionId, page, { action: 'click', target_id: id, params }, steps.length, depth + 1);
       steps.push(step);
-      if (step.status === 'error' && params.continue_on_error === false) {
+      if (step.status === 'error' && !continueOnError) {
         throw new Error(`multi_click failed at ${id}: ${step.error}`);
       }
     }
@@ -370,6 +581,7 @@ export class ActionExecutor {
 
   private async parallel(sessionId: string, page: Page, params: any, depth: number): Promise<Record<string, any>> {
     const steps = assertSteps(params.steps ?? params.actions, 'steps', 20);
+    if (steps.some((step) => step.action === 'parallel')) throw new Error('parallel nesting limit exceeded');
     for (const step of steps) {
       if (!PAR_ACTIONS.has(step.action)) {
         throw new Error(`parallel does not allow ${step.action}`);
@@ -385,6 +597,7 @@ export class ActionExecutor {
   }
 
   private async branch(sessionId: string, page: Page, params: any, depth: number): Promise<Record<string, any>> {
+    if (depth >= 3) throw new Error('if nesting limit exceeded');
     const matched = await this.testCondition(page, params.condition);
     const next = matched ? params.then : params.else;
     if (!next) {
@@ -416,6 +629,7 @@ export class ActionExecutor {
   }
 
   private async loop(sessionId: string, page: Page, params: any, depth: number): Promise<Record<string, any>> {
+    if (depth >= 2) throw new Error('loop nesting limit exceeded');
     const condition = params.while ?? params.condition;
     const step = params.do;
     if (!condition) throw new Error('loop condition is required');
@@ -515,6 +729,373 @@ export class ActionExecutor {
     };
   }
 
+  /**
+   * Concept §5.6: fill_and_verify — fill form fields then verify values match.
+   * Rounds: 2 (fill + verify). Policy: Rollback.
+   */
+  private async fillAndVerify(
+    sessionId: string,
+    page: Page,
+    targetId: string | undefined,
+    params: any,
+    depth: number
+  ): Promise<Record<string, any>> {
+    const formId = targetId ?? params.form_id;
+    if (!formId) throw new Error('form_id or target_id is required for fill_and_verify');
+    const original: FieldState[] = [];
+    for (const name of Object.keys(params.fields ?? {})) {
+      const field = await this.findFormField(page, formId, name);
+      original.push(await this.readField(page, field.id));
+    }
+
+    const fillResult = await this.fillForm(sessionId, page, targetId, {
+      ...params,
+      submit: false,
+      rollback: true,
+    }, depth);
+
+    // Verify round: re-read all fields and compare
+    const mismatches: Array<{ field: string; expected: unknown; actual: unknown }> = [];
+    for (const [name, expected] of Object.entries(params.fields ?? {})) {
+      try {
+        const field = await this.findFormField(page, formId, name);
+        const state = await this.readField(page, field.id);
+        const actual = state.kind === 'check' ? state.checked : state.value;
+        const expectedStr = String(expected);
+        const actualStr = String(actual);
+        if (actualStr !== expectedStr && !(state.kind === 'check' && Boolean(actual) === Boolean(expected))) {
+          mismatches.push({ field: name, expected, actual });
+        }
+      } catch {
+        mismatches.push({ field: name, expected, actual: '<read_failed>' });
+      }
+    }
+
+    if (mismatches.length > 0) {
+      const onFailure = params.on_failure ?? 'rollback';
+      if (onFailure === 'rollback') {
+        await this.restoreFields(page, original);
+        throw new LlmBrowserError('VALIDATION_ERROR', `fill_and_verify validation failed: ${JSON.stringify(mismatches)}`, {
+          mismatches,
+        });
+      }
+      return {
+        ...fillResult,
+        mode: 'fill_and_verify',
+        verified: false,
+        mismatches,
+      };
+    }
+
+    return {
+      ...fillResult,
+      mode: 'fill_and_verify',
+      verified: true,
+      mismatches: [],
+    };
+  }
+
+  /**
+   * Concept §5.6: navigate_and_extract — navigate to URL then extract content.
+   * Rounds: 2 (navigate + extract). Policy: Fail-fast.
+   */
+  private async navigateAndExtract(
+    sessionId: string,
+    page: Page,
+    params: any,
+    depth: number
+  ): Promise<Record<string, any>> {
+    if (!params.url) throw new Error('url is required for navigate_and_extract');
+
+    await this.dispatch(sessionId, page, 'navigate', undefined, {
+      url: params.url,
+      timeout_ms: params.timeout_ms,
+    }, depth + 1);
+
+    await this.shortStabilization(page, params.wait_ms ?? 2000);
+
+    const content = await this.pageSlice(page, 1);
+    const selector = params.extract_selector;
+    let extracted: string | undefined;
+    if (selector) {
+      extracted = await page.locator(String(selector)).first()
+        .textContent({ timeout: params.timeout_ms ?? 5000 })
+        .catch(() => undefined) ?? undefined;
+    }
+
+    return {
+      mode: 'navigate_and_extract',
+      url: page.url(),
+      title: content.title,
+      content: extracted ?? content.text,
+      headings: content.headings,
+      links: content.links,
+    };
+  }
+
+  /**
+   * Concept §5.6: login_flow — multi-step login sequence with rollback.
+   * Rounds: 4+ (navigate → fill credentials → submit → verify auth). Policy: Rollback.
+   */
+  private async loginFlow(
+    sessionId: string,
+    page: Page,
+    params: any,
+    depth: number
+  ): Promise<Record<string, any>> {
+    if (!params.url && !params.login_url) throw new Error('url or login_url is required for login_flow');
+    const steps: FlowStepResult[] = [];
+    const started = performance.now();
+    const originalUrl = page.url();
+    const changed: FieldState[] = [];
+    const onFailure = params.on_failure ?? 'rollback';
+
+    try {
+      // Step 1: Navigate to login page
+      const navStep = await this.runStep(sessionId, page,
+        { action: 'navigate', params: { url: params.url ?? params.login_url } },
+        0, depth + 1);
+      steps.push(navStep);
+      if (navStep.status === 'error') throw new Error(`login_flow navigate failed: ${navStep.error}`);
+
+      const formId = params.form_id ?? await this.detectFormContainer(page);
+
+      // Step 2: Fill credentials
+      const credentials = params.credentials ?? params.fields ?? {};
+      for (const [name, value] of Object.entries(credentials)) {
+        const field = await this.findFormField(page, formId, name);
+        changed.push(await this.readField(page, field.id));
+        await this.writeField(sessionId, page, field, value, params.timeout_ms, depth + 1);
+        steps.push({
+          index: steps.length,
+          action: 'type',
+          target_id: field.id,
+          status: 'success',
+          duration_ms: Math.round(performance.now() - started),
+          data: { field: name },
+        });
+      }
+
+      // Step 3: Submit
+      const submitTarget = params.submit_id ?? params.submit_button_id;
+      if (submitTarget) {
+        const submitStep = await this.runStep(sessionId, page,
+          { action: 'click', target_id: submitTarget },
+          steps.length, depth + 1);
+        steps.push(submitStep);
+        if (submitStep.status === 'error') throw new Error(`login_flow submit failed: ${submitStep.error}`);
+      } else {
+        const submitStep = await this.runStep(sessionId, page,
+          { action: 'submit', target_id: formId },
+          steps.length, depth + 1);
+        steps.push(submitStep);
+        if (submitStep.status === 'error') throw new Error(`login_flow submit failed: ${submitStep.error}`);
+      }
+
+      await this.shortStabilization(page, params.wait_after_submit_ms ?? 3000);
+
+      // Step 4: Verify authentication
+      let authenticated = false;
+      if (params.success_url) {
+        authenticated = page.url().includes(String(params.success_url));
+      } else if (params.success_element) {
+        const locator = await this.locatorForAny(page, String(params.success_element));
+        authenticated = (await locator.count().catch(() => 0)) > 0;
+      } else {
+        // Default: check that URL changed from login page
+        authenticated = page.url() !== (params.url ?? params.login_url);
+      }
+
+      if (!authenticated) throw new Error('login_flow verification failed');
+
+      return {
+        ...report('login_flow', steps),
+        authenticated,
+        url: page.url(),
+        duration_ms: Math.round(performance.now() - started),
+      };
+    } catch (error: any) {
+      steps.push({
+        index: steps.length,
+        action: 'rollback',
+        status: onFailure === 'rollback' ? 'success' : 'skipped',
+        duration_ms: Math.round(performance.now() - started),
+        error: error.message,
+      });
+      if (onFailure === 'rollback') {
+        await this.restoreFields(page, changed);
+        if (originalUrl && page.url() !== originalUrl) {
+          await page.goto(originalUrl, { waitUntil: 'load', timeout: params.timeout_ms ?? 10000 }).catch(() => undefined);
+        }
+      }
+      if (onFailure === 'continue') {
+        return {
+          ...report('login_flow', steps),
+          authenticated: false,
+          partial: true,
+          error: error.message,
+          url: page.url(),
+          duration_ms: Math.round(performance.now() - started),
+        };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Concept §5.7: async_navigate — background navigation with operation_id.
+   */
+  private async asyncNavigate(sessionId: string, params: any): Promise<Record<string, any>> {
+    if (!params.url) throw new Error('url is required for async_navigate');
+
+    const page = this.browserCore.getPage(sessionId);
+    const record = this.opStore.start({
+      session_id: sessionId,
+      action: 'async_navigate',
+      estimated_time_ms: params.estimated_time_ms ?? 10000,
+      cancel: async () => {
+        await page.evaluate(() => window.stop()).catch(() => undefined);
+      },
+      run: async () => {
+        await page.goto(resolvePageUrl(page, String(params.url)), { waitUntil: 'load' });
+        await page.waitForLoadState('networkidle', { timeout: params.timeout_ms ?? 30000 }).catch(() => undefined);
+        return { url: page.url(), title: await page.title() };
+      },
+    });
+
+    return {
+      status: 'started',
+      operation_id: record.operation_id,
+      action: 'async_navigate',
+      state: record.state,
+      estimated_time_ms: record.estimated_time_ms,
+    };
+  }
+
+  /**
+   * Concept §5.7: poll — check async operation status.
+   */
+  private async pollOp(params: any): Promise<Record<string, any>> {
+    if (!params.operation_id) throw new Error('operation_id is required for poll');
+
+    const record = this.opStore.get(String(params.operation_id));
+    if (!record) throw new Error(`Operation not found: ${params.operation_id}`);
+
+    return this.opStore.toStatus(record);
+  }
+
+  /**
+   * Concept §5.7: cancel — cancel async operation with partial result.
+   */
+  private async cancelOp(params: any): Promise<Record<string, any>> {
+    if (!params.operation_id) throw new Error('operation_id is required for cancel');
+
+    const record = this.opStore.cancel(String(params.operation_id));
+    if (!record) throw new Error(`Operation not found: ${params.operation_id}`);
+
+    return {
+      status: 'cancelled',
+      operation_id: record.operation_id,
+      cancelled_at_progress: record.progress,
+      partial_result: record.partial_result,
+    };
+  }
+
+  /**
+   * Concept §5.8: try-catch — error handling with fallback actions.
+   */
+  private async tryCatch(
+    sessionId: string,
+    page: Page,
+    params: any,
+    depth: number
+  ): Promise<Record<string, any>> {
+    if (depth >= 2) throw new Error('try nesting limit exceeded');
+    if (!params.do?.action) throw new Error('try requires a "do" action');
+
+    try {
+      const result = await this.runStep(sessionId, page, params.do, 0, depth + 1);
+      if (result.status === 'error') throw new Error(result.error);
+      return {
+        mode: 'try',
+        branch: 'do',
+        ...result,
+      };
+    } catch (error: any) {
+      const { code } = classifyActionError(error);
+
+      // Find matching catch block
+      const catches: Array<{ error_code?: string | string[]; action?: FlowStep; fallback?: FlowStep }> =
+        Array.isArray(params.catch) ? params.catch : (params.catch ? [params.catch] : []);
+
+      for (const handler of catches) {
+        if (handler.error_code) {
+          const codes = Array.isArray(handler.error_code) ? handler.error_code : [handler.error_code];
+          if (!codes.includes(code) && !codes.includes('*')) continue;
+        }
+        // Matched — execute fallback
+        const fallbackAction = (handler.fallback ?? (typeof handler.action === 'object' ? handler.action : handler)) as FlowStep;
+        if (!fallbackAction?.action || typeof fallbackAction.action !== 'string') {
+          throw new Error('try catch handler requires fallback action');
+        }
+        const fallback = await this.runStep(sessionId, page, fallbackAction, 0, depth + 1);
+        return {
+          mode: 'try',
+          branch: 'catch',
+          caught_error: { code, message: error.message },
+          ...fallback,
+        };
+      }
+
+      // No matching catch — re-throw
+      throw error;
+    }
+  }
+
+  /**
+   * Concept §5.8: define_script — register named parameterized sequence.
+   */
+  private async defineScript(params: any): Promise<Record<string, any>> {
+    if (!params.name) throw new Error('name is required for define_script');
+    if (!Array.isArray(params.steps)) throw new Error('steps array is required for define_script');
+
+    const name = String(params.name);
+    const declaredParams: string[] = params.params ?? params.parameters ?? [];
+    this.scripts.define(name, params.steps, declaredParams);
+
+    return {
+      mode: 'define_script',
+      name,
+      steps_count: params.steps.length,
+      params: declaredParams,
+      registered: true,
+    };
+  }
+
+  /**
+   * Concept §5.8: call_script — execute named script with argument substitution.
+   */
+  private async callScript(
+    sessionId: string,
+    page: Page,
+    params: any,
+    depth: number
+  ): Promise<Record<string, any>> {
+    if (!params.name) throw new Error('name is required for call_script');
+
+    const script = this.scripts.get(String(params.name));
+    if (!script) throw new LlmBrowserError('SCRIPT_NOT_FOUND', `Script not found: ${params.name}`);
+
+    const args = params.args ?? params.arguments ?? {};
+    const instantiated = this.scripts.instantiate(script.steps, args);
+
+    // Execute as sequence
+    return this.sequence(sessionId, page, {
+      steps: instantiated,
+      stop_on_error: params.stop_on_error ?? true,
+    }, depth);
+  }
+
   private async upload(sessionId: string, page: Page, targetId: string | undefined, params: any): Promise<Record<string, any>> {
     if (!targetId) throw new Error('Target ID is required for upload action');
     const locator = await this.locatorForAny(page, targetId);
@@ -547,7 +1128,7 @@ export class ActionExecutor {
         anchor.remove();
       }, { url: params.url, fileName: params.file_name });
     } else {
-      const locator = await this.resolveActionableLocator(page, targetId, 'download');
+      const locator = await this.resolveActionableLocator(page, targetId, 'download', params);
       await locator.click({ timeout });
     }
 
@@ -580,7 +1161,7 @@ export class ActionExecutor {
       timeout: params.timeout_ms ?? 5000,
     };
     const buffer = targetId
-      ? await (await this.resolveActionableLocator(page, targetId, action)).screenshot(options)
+      ? await (await this.resolveActionableLocator(page, targetId, action, params)).screenshot(options)
       : await page.screenshot({
           ...options,
           fullPage: params.full_page !== false,
@@ -744,6 +1325,20 @@ export class ActionExecutor {
         return new RegExp(String(condition.pattern ?? condition.value ?? '')).test(page.url());
       case 'network_idle':
         return page.waitForLoadState('networkidle', { timeout: condition.timeout_ms ?? 1000 }).then(() => true).catch(() => false);
+      case 'custom_javascript': {
+        const expression = condition.expression ?? condition.script ?? condition.javascript;
+        if (typeof expression !== 'string' || expression.trim() === '') {
+          throw new Error('custom_javascript condition requires expression');
+        }
+        const timeoutMs = Math.min(Math.max(Number(condition.timeout_ms ?? 1000), 50), 5000);
+        return Promise.race([
+          page.evaluate((source) => {
+            const fn = new Function(`return Boolean(${source});`);
+            return Boolean(fn());
+          }, expression),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+        ]).catch(() => false);
+      }
       default:
         throw new Error(`Unsupported condition: ${condition.type}`);
     }
@@ -774,7 +1369,7 @@ export class ActionExecutor {
         return norm((explicit ?? implicit)?.textContent);
       };
       const form = formElement;
-      if (!(form instanceof HTMLFormElement)) throw new Error(`Form not found: ${formId}`);
+      if (!(form instanceof HTMLElement)) throw new Error(`Form container not found: ${formId}`);
 
       const wanted = norm(key);
       const controls = Array.from(form.querySelectorAll('input, select, textarea')).filter(
@@ -806,6 +1401,28 @@ export class ActionExecutor {
     }, { formId, key, prefix });
 
     return field as FieldRef;
+  }
+
+  private async detectFormContainer(page: Page): Promise<string> {
+    return page.evaluate(() => {
+      const semanticIdAttr = 'data-llm-browser-id';
+      const state = window as unknown as { __llmBrowserNextId?: number };
+      state.__llmBrowserNextId ??= 1;
+      const ensureId = (el: HTMLElement): string => {
+        const existing = el.getAttribute(semanticIdAttr);
+        if (existing) return existing;
+        if (el.id) return el.id;
+        const id = `login-form-${state.__llmBrowserNextId}`;
+        state.__llmBrowserNextId = (state.__llmBrowserNextId ?? 1) + 1;
+        el.setAttribute(semanticIdAttr, id);
+        return id;
+      };
+      const forms = Array.from(document.querySelectorAll('form')) as HTMLFormElement[];
+      const passwordForm = forms.find((form) => form.querySelector('input[type="password"]'));
+      const form = passwordForm ?? forms[0];
+      if (form) return ensureId(form);
+      return ensureId(document.body);
+    });
   }
 
   private async readField(page: Page, fieldId: string): Promise<FieldState> {
@@ -871,7 +1488,7 @@ export class ActionExecutor {
   private async validateForm(page: Page, formId: string): Promise<{ valid: boolean; errors: any[] }> {
     const locator = await this.locatorForAny(page, formId);
     return locator.evaluate((form, formId) => {
-      if (!(form instanceof HTMLFormElement)) throw new Error(`Form not found: ${formId}`);
+      if (!(form instanceof HTMLElement)) throw new Error(`Form container not found: ${formId}`);
 
       const controls = Array.from(form.querySelectorAll('input, select, textarea')).filter(
         (el): el is HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement =>
@@ -886,7 +1503,9 @@ export class ActionExecutor {
         }));
 
       return {
-        valid: form.checkValidity(),
+        valid: form instanceof HTMLFormElement
+          ? form.checkValidity()
+          : controls.every((field) => field.validity.valid),
         errors,
       };
     }, formId);
@@ -955,7 +1574,12 @@ export class ActionExecutor {
     }, index);
   }
 
-  private async resolveActionableLocator(page: Page, targetId: string | undefined, action: string): Promise<Locator> {
+  private async resolveActionableLocator(
+    page: Page,
+    targetId: string | undefined,
+    action: string,
+    params: Record<string, any> = {}
+  ): Promise<Locator> {
     if (!targetId) throw new Error(`Target ID is required for ${action} action`);
 
     const locator = await this.locatorForAny(page, targetId);
@@ -964,7 +1588,64 @@ export class ActionExecutor {
     const isDisabled = await locator.isDisabled().catch(() => false);
     if (isDisabled) throw new Error(`Target ${targetId} is disabled`);
 
+    await this.assertPreconditions(page, locator, targetId, action, params);
     return locator;
+  }
+
+  private async assertPreconditions(
+    page: Page,
+    locator: Locator,
+    targetId: string,
+    action: string,
+    params: Record<string, any>
+  ): Promise<void> {
+    const preconditions = new Set<string>([
+      ...defaultPreconditions(action),
+      ...toArray(params.preconditions),
+    ]);
+
+    if (preconditions.has('page_loaded')) {
+      const ready = await page.evaluate(() => document.readyState !== 'loading').catch(() => false);
+      if (!ready) throw new LlmBrowserError('PAGE_NOT_LOADED', 'Page is not loaded enough for action', { target_id: targetId, action });
+    }
+
+    if (preconditions.has('network_idle')) {
+      const idle = await page.waitForLoadState('networkidle', { timeout: Number(params.precondition_timeout_ms ?? 1000) })
+        .then(() => true)
+        .catch(() => false);
+      if (!idle) throw new LlmBrowserError('ACTION_PRECONDITION_FAILED', 'network_idle precondition failed', { target_id: targetId, action });
+    }
+
+    if (preconditions.has('no_modal_open')) {
+      const blocked = await locator.evaluate((target) => {
+        const visible = (el: Element) => {
+          const style = window.getComputedStyle(el);
+          const rect = (el as HTMLElement).getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const modals = Array.from(document.querySelectorAll('dialog[open], [role="dialog"][aria-modal="true"], [aria-modal="true"], .modal, [data-modal="true"]'))
+          .filter((el) => visible(el) && !el.contains(target));
+        return modals.length > 0;
+      }).catch(() => false);
+      if (blocked) throw new LlmBrowserError('MODAL_OPEN', 'A modal is open and blocks the target action', { target_id: targetId, action });
+    }
+
+    if (preconditions.has('element_stable')) {
+      const stable = await this.isStable(locator);
+      if (!stable) throw new LlmBrowserError('ELEMENT_NOT_STABLE', `Target ${targetId} is moving or animating`, { target_id: targetId, action });
+    }
+  }
+
+  private async isStable(locator: Locator): Promise<boolean> {
+    const before = await locator.boundingBox().catch(() => null);
+    if (!before) return false;
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    const after = await locator.boundingBox().catch(() => null);
+    if (!after) return false;
+    return Math.abs(before.x - after.x) <= 1
+      && Math.abs(before.y - after.y) <= 1
+      && Math.abs(before.width - after.width) <= 1
+      && Math.abs(before.height - after.height) <= 1;
   }
 
   private async locatorForAny(page: Page, targetId: string): Promise<Locator> {
@@ -1067,6 +1748,13 @@ function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
 }
 
+function defaultPreconditions(action: string): string[] {
+  if (['click', 'type', 'select', 'submit', 'hover', 'interact', 'download', 'screenshot'].includes(action)) {
+    return ['element_visible', 'element_enabled', 'element_stable', 'no_modal_open', 'page_loaded'];
+  }
+  return [];
+}
+
 function arrayParam(value: unknown): any[] {
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? value : [value];
@@ -1081,4 +1769,30 @@ function contentBuffer(params: Record<string, any>): Buffer {
   if (params.content !== undefined) return Buffer.from(String(params.content), 'utf8');
   if (params.file_content !== undefined) return Buffer.from(String(params.file_content), params.encoding === 'base64' ? 'base64' : 'utf8');
   throw new Error('content or base64 is required for fs write');
+}
+
+function resolvePageUrl(page: Page, url: string): string {
+  if (/^(https?:|file:|data:|about:)/i.test(url)) return url;
+  return new URL(url, page.url()).toString();
+}
+
+function substituteTemplate(value: unknown, args: Record<string, any>): unknown {
+  if (Array.isArray(value)) return value.map((entry) => substituteTemplate(entry, args));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, substituteTemplate(entry, args)])
+    );
+  }
+  if (typeof value !== 'string') return value;
+
+  const exact = value.match(/^\{\{(\w+)\}\}$/);
+  if (exact) {
+    if (args[exact[1]] === undefined) throw new Error(`Missing script parameter: {{${exact[1]}}}`);
+    return args[exact[1]];
+  }
+
+  return value.replace(/\{\{(\w+)\}\}/g, (_, key) => {
+    if (args[key] === undefined) throw new Error(`Missing script parameter: {{${key}}}`);
+    return String(args[key]);
+  });
 }

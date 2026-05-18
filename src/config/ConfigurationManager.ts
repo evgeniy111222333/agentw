@@ -35,6 +35,7 @@ export interface SecurityConfig {
   domain_blacklist: string[];
   session_timeout_seconds: number;
   max_actions_per_session: number;
+  degradation_level: 'normal' | 'moderate' | 'severe';
 }
 
 export interface MonitoringConfig {
@@ -127,6 +128,7 @@ export class ConfigurationManager {
         domain_blacklist: envCsv('LLM_BROWSER_DOMAIN_BLACKLIST'),
         session_timeout_seconds: envNumber('LLM_BROWSER_SESSION_TIMEOUT_SECONDS', 1800),
         max_actions_per_session: envNumber('LLM_BROWSER_MAX_ACTIONS_PER_SESSION', 1000),
+        degradation_level: envEnum('LLM_BROWSER_DEGRADATION_LEVEL', ['normal', 'moderate', 'severe'], 'normal'),
       },
       monitoring: {
         audit_enabled: envBoolean('LLM_BROWSER_AUDIT_ENABLED', true),
@@ -175,6 +177,11 @@ function envCsv(name: string): string[] {
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function envEnum<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
+  const value = process.env[name]?.toLowerCase();
+  return allowed.includes(value as T) ? (value as T) : fallback;
 }
 
 function deepMerge<T extends Record<string, any>>(base: T, patch: Partial<T>): T {

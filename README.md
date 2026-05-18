@@ -296,22 +296,39 @@ SAM actions appear in `available_actions` with `source.standard = "SAM"` and an 
 
 ## Flow Actions
 
-Agent workflows can run as one request:
+Agent workflows can run as one declarative request. Actions are validated in three stages before execution: syntactic params, semantic target state, and security/risk policy.
 
 - `fill_form` fills named form fields and can submit after validation.
+- `fill_and_verify` fills fields, verifies the resulting state, and rolls back on verification failure.
 - `multi_click` clicks a bounded list of element IDs.
 - `sequence` runs ordered steps.
 - `parallel` runs independent safe steps.
 - `if`, `loop`, and `wait_for` handle state-dependent pages.
 - `search_and_paginate` searches, follows a next control, and returns compact page slices.
+- `navigate_and_extract` navigates and returns a compact content slice.
+- `login_flow` runs navigate, credential fill, submit, and verification with rollback policy.
+- `define_script` and `call_script` register parameterized reusable action sequences.
+- `try` runs fallback actions by `error_code`.
+
+Targeted `available_actions` include `preconditions` such as `element_visible`, `element_enabled`, `element_stable`, `no_modal_open`, and `page_loaded`, plus both `risk` and numeric `risk_score`. During configured degradation (`LLM_BROWSER_DEGRADATION_LEVEL=moderate|severe`), medium/high-risk actions are blocked before browser execution.
+
+Retry follows the concept error classes: transient failures retry with 100/200/400 ms backoff, external failures with 1000/2000/4000 ms backoff, and permanent validation/lookup failures do not retry. Retry attempts publish `action_retry` stream events with remaining attempts and error classification.
 
 ```ts
 await session.fillForm('login', { email: 'user@example.com', password: 'secret' }, true);
+
+await session.fillAndVerify('profile', { email: 'verified@example.com' });
 
 await session.sequence([
   { action: 'wait_for', params: { condition: { type: 'element_visible', element_id: 'results' } } },
   { action: 'click', target_id: 'next-page' }
 ]);
+
+await session.defineScript('accept_and_save', [
+  { action: 'if', params: { condition: { type: 'element_exists', element_id: 'cookie-accept' }, then: { action: 'click', target_id: 'cookie-accept' } } },
+  { action: 'click', target_id: 'save-button' }
+]);
+await session.callScript('accept_and_save');
 ```
 
 ## Ops
@@ -329,6 +346,8 @@ const op = await session.start('wait_for', {
 const status = await session.poll(op.operation_id);
 await session.cancel(op.operation_id);
 ```
+
+`async_navigate` is exposed as a first-class operation and returns immediately with an `operation_id`; `poll` includes progress and estimated remaining time when available.
 
 REST endpoints:
 

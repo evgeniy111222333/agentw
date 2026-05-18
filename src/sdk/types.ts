@@ -17,7 +17,9 @@ import {
 export type BrowserAction =
   | 'click'
   | 'fill_form'
+  | 'fill_and_verify'
   | 'go_back'
+  | 'go_forward'
   | 'hover'
   | 'interact'
   | 'if'
@@ -26,6 +28,9 @@ export type BrowserAction =
   | 'loop'
   | 'multi_click'
   | 'navigate'
+  | 'navigate_and_extract'
+  | 'login_flow'
+  | 'async_navigate'
   | 'new_tab'
   | 'open_tab'
   | 'parallel'
@@ -54,7 +59,11 @@ export type BrowserAction =
   | 'screenshot_to_file'
   | 'list_tabs'
   | 'close_tab'
-  | 'upload';
+  | 'upload'
+  | 'define_script'
+  | 'call_script'
+  | 'try'
+  | 'noop';
 
 export interface CommandResult {
   status: 'success';
@@ -100,6 +109,7 @@ export interface OpStatus {
   updated_at: string;
   completed_at?: string;
   estimated_time_ms?: number;
+  estimated_time_remaining_ms?: number;
   result?: CommandResult;
   partial_result?: CommandResult;
   error?: {
@@ -287,6 +297,8 @@ export interface BrowserSessionContract {
   clearEvents(): Promise<void>;
   traces(): Promise<Pagination<TraceRecord>>;
   navigate(url: string): Promise<CommandResult>;
+  asyncNavigate(url: string, options?: Record<string, any>): Promise<OpStart>;
+  navigateAndExtract(url: string, options?: Record<string, any>): Promise<CommandResult>;
   openTab(url?: string): Promise<CommandResult>;
   switchTab(tabId: string): Promise<CommandResult>;
   closeTab(tabId?: string): Promise<CommandResult>;
@@ -296,7 +308,20 @@ export interface BrowserSessionContract {
   type(targetId: string, text: string, options?: Record<string, any>): Promise<CommandResult>;
   select(targetId: string, value: string): Promise<CommandResult>;
   submit(targetId: string): Promise<CommandResult>;
+  goBack(): Promise<CommandResult>;
+  goForward(): Promise<CommandResult>;
   fillForm(formId: string, fields: Record<string, any>, submit?: boolean): Promise<CommandResult>;
+  fillAndVerify(formId: string, fields: Record<string, any>, options?: Record<string, any>): Promise<CommandResult>;
+  loginFlow(url: string, credentials: Record<string, any>, options?: Record<string, any>): Promise<CommandResult>;
+  multiClick(targetIds: string[]): Promise<CommandResult>;
+  sequence(steps: Array<Record<string, any>>): Promise<CommandResult>;
+  waitFor(condition: Record<string, any>, options?: Record<string, any>): Promise<CommandResult>;
+  search(inputId: string, query: string, options?: Record<string, any>): Promise<CommandResult>;
+  scroll(direction?: 'up' | 'down', amount?: number): Promise<CommandResult>;
+  wait(ms?: number): Promise<CommandResult>;
+  defineScript(name: string, steps: Array<Record<string, any>>, params?: string[]): Promise<CommandResult>;
+  callScript(name: string, args?: Record<string, any>): Promise<CommandResult>;
+  tryAction(step: Record<string, any>, handlers?: Array<Record<string, any>> | Record<string, any>): Promise<CommandResult>;
   start(action: BrowserAction | string, options?: ExecuteActionOptions): Promise<OpStart>;
   poll(operationId: string): Promise<OpStatus>;
   cancel(operationId: string): Promise<OpStatus>;

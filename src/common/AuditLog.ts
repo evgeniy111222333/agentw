@@ -47,9 +47,53 @@ export class AuditLog {
 
 export const globalAuditLog = new AuditLog();
 
+const ACTION_RISK_SCORE: Record<string, number> = {
+  snapshot: 0,
+  list_tabs: 0,
+  wait: 0,
+  wait_for: 0,
+  poll: 0,
+  scroll: 5,
+  scroll_to_element: 5,
+  set_viewport: 5,
+  hover: 5,
+  click: 10,
+  go_back: 10,
+  go_forward: 10,
+  keyboard: 10,
+  invalidate_cache: 10,
+  new_tab: 10,
+  open_tab: 10,
+  screenshot: 10,
+  screenshot_file: 15,
+  screenshot_to_file: 15,
+  pdf: 15,
+  pdf_generate: 15,
+  refresh: 15,
+  type: 15,
+  select: 15,
+  close_tab: 15,
+  interact: 20,
+  loop: 20,
+  multi_click: 20,
+  try: 20,
+  search_and_paginate: 25,
+  parallel: 25,
+  call_script: 30,
+  define_script: 5,
+  fs: 30,
+  file_system: 30,
+  navigate: 30,
+  async_navigate: 30,
+  navigate_and_extract: 35,
+  fill_form: 35,
+  fill_and_verify: 35,
+  submit: 40,
+  upload: 40,
+  download: 40,
+  login_flow: 75,
+};
+
 export function riskScoreForAction(action: string): number {
-  if (['download', 'fs', 'file_system', 'pdf', 'pdf_generate', 'screenshot', 'screenshot_file', 'screenshot_to_file', 'submit', 'type', 'upload'].includes(action)) return 60;
-  if (['navigate', 'keyboard'].includes(action)) return 50;
-  if (['click', 'select', 'hover'].includes(action)) return 30;
-  return 10;
+  return ACTION_RISK_SCORE[action] ?? 50;
 }

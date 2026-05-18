@@ -14,6 +14,7 @@ import { SecurityPolicy } from '../security/SecurityPolicy';
 import { OpStart, OpStatus, OpStore } from '../op/Op';
 import { globalTraceStore } from '../trace/Trace';
 import { activeTab, snapKey } from '../session/Tabs';
+import { ConfigurationManager } from '../config/ConfigurationManager';
 
 export interface AgentCommand {
   action: string;
@@ -66,6 +67,7 @@ interface ResolvedAction {
 const actionSchemas: Record<string, ActionSchema> = {
   click: { target: 'required', retryable: true },
   go_back: { target: 'none', retryable: true },
+  go_forward: { target: 'none', retryable: true },
   hover: { target: 'required', retryable: true },
   interact: { target: 'required', retryable: true },
   keyboard: { target: 'none', requiredParams: ['key'] },
@@ -152,7 +154,15 @@ const actionSchemas: Record<string, ActionSchema> = {
     retryable: true,
   },
   scroll_to_element: { target: 'required', retryable: true },
-  select: { target: 'required', requiredParams: ['value'], retryable: true },
+  select: {
+    target: 'required',
+    validate: (params) => {
+      if (params.value === undefined && params.label === undefined) {
+        throw new LlmBrowserError('MISSING_PARAM', 'select requires value or label');
+      }
+    },
+    retryable: true,
+  },
   snapshot: { target: 'none' },
   sequence: {
     target: 'none',
@@ -164,8 +174,40 @@ const actionSchemas: Record<string, ActionSchema> = {
   type: { target: 'required', requiredParams: ['text'], retryable: true },
   wait: { target: 'none' },
   wait_for: { target: 'none', requiredParams: ['condition'], retryable: true },
+  fill_and_verify: {
+    target: 'optional',
+    requiredParams: ['fields'],
+    validate: (params) => {
+      if (!params.fields || typeof params.fields !== 'object' || Array.isArray(params.fields)) {
+        throw new LlmBrowserError('INVALID_PARAMS', 'fill_and_verify fields must be an object');
+      }
+    },
+  },
+  navigate_and_extract: { target: 'none', requiredParams: ['url'], retryable: true },
+  login_flow: {
+    target: 'none',
+    validate: (params) => {
+      if (!params.url && !params.login_url) throw new LlmBrowserError('MISSING_PARAM', 'login_flow requires url or login_url');
+      if (!params.credentials && !params.fields) throw new LlmBrowserError('MISSING_PARAM', 'login_flow requires credentials or fields');
+    },
+  },
+  async_navigate: { target: 'none', requiredParams: ['url'], retryable: true },
   poll: { target: 'none', requiredParams: ['operation_id'] },
   cancel: { target: 'none', requiredParams: ['operation_id'] },
+  try: {
+    target: 'none',
+    validate: (params) => {
+      if (!params.do?.action) throw new LlmBrowserError('MISSING_PARAM', 'try requires a do action');
+    },
+  },
+  define_script: {
+    target: 'none',
+    validate: (params) => {
+      if (!params.name) throw new LlmBrowserError('MISSING_PARAM', 'define_script requires name');
+      if (!Array.isArray(params.steps)) throw new LlmBrowserError('MISSING_PARAM', 'define_script requires steps');
+    },
+  },
+  call_script: { target: 'none', requiredParams: ['name'] },
 };
 
 export class CommandRouter {
@@ -184,6 +226,13 @@ export class CommandRouter {
   async execute(command: AgentCommand): Promise<RouterResult> {
     if (command.action === 'poll') return this.poll(command);
     if (command.action === 'cancel') return this.cancel(command);
+    if (command.action === 'async_navigate') {
+      return this.start({
+        ...command,
+        action: 'navigate',
+        action_params: { ...(command.action_params ?? {}), async: true },
+      }, 'async_navigate');
+    }
     if (command.action_params?.async === true) return this.start(command);
     return this.executeSync(command);
   }
@@ -202,7 +251,7 @@ export class CommandRouter {
     return record ? this.ops.toStatus(record) : undefined;
   }
 
-  private async start(command: AgentCommand): Promise<OpStart> {
+  private async start(command: AgentCommand, opAction = command.action): Promise<OpStart> {
     const traceId = command.trace_id ?? randomUUID();
     const actionParams = stripOpParams(command.action_params ?? {});
     const asyncCommand = {
@@ -221,8 +270,12 @@ export class CommandRouter {
     const estimatedTimeMs = estimateMs(resolvedAction.executionAction, resolvedAction.params);
     const op = this.ops.start({
       session_id: command.session_id,
-      action: command.action,
+      action: opAction,
       estimated_time_ms: estimatedTimeMs,
+      cancel: async () => {
+        const page = this.browserCore.getPage(command.session_id);
+        await page.evaluate(() => window.stop()).catch(() => undefined);
+      },
       run: () => this.executeSync(asyncCommand, {
         traceId,
         resolvedAction,
@@ -235,7 +288,7 @@ export class CommandRouter {
     globalAuditLog.record({
       category: 'ACTION',
       session_id: command.session_id,
-      action: command.action,
+      action: opAction,
       target: resolvedAction.targetId,
       result: 'success',
       request_id: traceId,
@@ -243,13 +296,14 @@ export class CommandRouter {
       metadata: {
         operation_id: op.operation_id,
         async: true,
+        execution_action: resolvedAction.executionAction,
       },
     });
 
     return {
       status: 'started',
       operation_id: op.operation_id,
-      action: command.action,
+      action: opAction,
       state: op.state,
       estimated_time_ms: estimatedTimeMs,
       metadata: {
@@ -355,7 +409,8 @@ export class CommandRouter {
             activeAction.executionAction,
             activeAction.targetId,
             activeAction.params,
-            previousSnapshot
+            previousSnapshot,
+            ConfigurationManager.getInstance().getConfig().security.degradation_level
           )
         );
         if (!validation.valid) {
@@ -649,29 +704,7 @@ export class CommandRouter {
     targetId: string | undefined,
     params: Record<string, any>
   ): Promise<ActionExecutionResult> {
-    const schema = actionSchemas[action];
-    const maxAttempts = schema?.retryable ? 2 : 1;
-    let lastError: unknown;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        const result = await this.actionExecutor.executeAction(sessionId, action, targetId, params);
-        return {
-          ...result,
-          data: {
-            ...result.data,
-            attempts: attempt,
-          },
-        };
-      } catch (error) {
-        lastError = error;
-        const normalized = normalizeError(error);
-        if (!normalized.recoverable || attempt === maxAttempts) break;
-        await delay(100 * attempt);
-      }
-    }
-
-    throw lastError;
+    return this.actionExecutor.executeAction(sessionId, action, targetId, params);
   }
 
   private validateCommand(command: AgentCommand): ResolvedAction {
@@ -857,7 +890,6 @@ function stripRoutingParams(params: Record<string, any>): Record<string, any> {
 function stripOpParams(params: Record<string, any>): Record<string, any> {
   const clone = { ...params };
   delete clone.async;
-  delete clone.estimated_time_ms;
   return clone;
 }
 
@@ -872,10 +904,6 @@ function estimateMs(action: string, params: Record<string, any>): number {
   if (action === 'search_and_paginate') return Math.min(Math.max(Number(params.max_pages ?? 1), 1), 20) * 750;
   if (action === 'sequence') return Array.isArray(params.steps) ? params.steps.length * 500 : 1000;
   return 1000;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function errorDetails(error: any): { message: string; code?: string } {

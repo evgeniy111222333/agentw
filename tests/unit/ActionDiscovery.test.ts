@@ -19,6 +19,12 @@ describe('ActionDiscovery', () => {
     expect(actions).toContainEqual(expect.objectContaining({
       action: 'click', target: 'btn-1'
     }));
+    expect(actions.find((action) => action.action === 'click' && action.target === 'btn-1')).toEqual(
+      expect.objectContaining({
+        preconditions: expect.arrayContaining(['element_visible', 'element_enabled', 'element_stable', 'no_modal_open', 'page_loaded']),
+        risk_score: expect.any(Number),
+      })
+    );
     
     expect(actions).toContainEqual(expect.objectContaining({
       action: 'navigate', target: 'link-1'
@@ -68,6 +74,24 @@ describe('ActionDiscovery', () => {
 
     expect(actions).toContainEqual(expect.objectContaining({
       action: 'invalidate_cache'
+    }));
+
+    expect(actions).toContainEqual(expect.objectContaining({
+      action: 'fill_and_verify',
+      target: 'form-1'
+    }));
+
+    expect(actions).toContainEqual(expect.objectContaining({
+      action: 'sequence'
+    }));
+
+    expect(actions).toContainEqual(expect.objectContaining({
+      action: 'define_script'
+    }));
+
+    expect(actions).toContainEqual(expect.objectContaining({
+      action: 'async_navigate',
+      risk_score: 30
     }));
   });
 

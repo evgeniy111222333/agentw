@@ -303,6 +303,14 @@ export class BrowserSession {
     return this.client.executeAction(this.id, 'navigate', { params: { url } });
   }
 
+  asyncNavigate(url: string, options: Record<string, any> = {}): Promise<OpStart> {
+    return this.client.startAction(this.id, 'async_navigate', { params: { ...options, url } });
+  }
+
+  navigateAndExtract(url: string, options: Record<string, any> = {}): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'navigate_and_extract', { params: { ...options, url } });
+  }
+
   tabs(): Promise<TabState[]> {
     return this.client.listTabs(this.id);
   }
@@ -359,10 +367,31 @@ export class BrowserSession {
     return this.client.executeAction(this.id, 'submit', { target_id: targetId });
   }
 
+  goBack(): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'go_back');
+  }
+
+  goForward(): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'go_forward');
+  }
+
   fillForm(formId: string, fields: Record<string, any>, submit = false): Promise<CommandResult> {
     return this.client.executeAction(this.id, 'fill_form', {
       target_id: formId,
       params: { fields, submit },
+    });
+  }
+
+  fillAndVerify(formId: string, fields: Record<string, any>, options: Record<string, any> = {}): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'fill_and_verify', {
+      target_id: formId,
+      params: { ...options, fields },
+    });
+  }
+
+  loginFlow(url: string, credentials: Record<string, any>, options: Record<string, any> = {}): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'login_flow', {
+      params: { ...options, url, credentials },
     });
   }
 
@@ -375,6 +404,24 @@ export class BrowserSession {
   sequence(steps: Array<Record<string, any>>): Promise<CommandResult> {
     return this.client.executeAction(this.id, 'sequence', {
       params: { steps },
+    });
+  }
+
+  defineScript(name: string, steps: Array<Record<string, any>>, params: string[] = []): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'define_script', {
+      params: { name, steps, params },
+    });
+  }
+
+  callScript(name: string, args: Record<string, any> = {}): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'call_script', {
+      params: { name, args },
+    });
+  }
+
+  tryAction(step: Record<string, any>, handlers: Array<Record<string, any>> | Record<string, any> = []): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'try', {
+      params: { do: step, catch: handlers },
     });
   }
 

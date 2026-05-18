@@ -1,4 +1,5 @@
 import { AvailableAction, SemanticElement } from '../../common/types';
+import { riskScoreForAction } from '../../common/AuditLog';
 
 export class ActionDiscovery {
   discover(elements: SemanticElement[]): AvailableAction[] {
@@ -68,7 +69,7 @@ export class ActionDiscovery {
       } else if (el.type === 'select') {
         actions.push(
           this.targeted('select', el, el.label || 'Select option', {
-            schema: { value: 'string' },
+            schema: { value: 'string?', label: 'string?' },
             options: el.options,
           })
         );
@@ -80,6 +81,16 @@ export class ActionDiscovery {
               fields: 'object',
               submit: 'boolean?',
               rollback: 'boolean?',
+              on_failure: 'continue|rollback|fail?',
+            },
+            fields: el.fields,
+          })
+        );
+        actions.push(
+          this.targeted('fill_and_verify', el, el.label || 'Fill and verify form', {
+            schema: {
+              fields: 'object',
+              on_failure: 'continue|rollback?',
             },
             fields: el.fields,
           })
@@ -113,6 +124,12 @@ export class ActionDiscovery {
         action_id: 'go_back',
         action: 'go_back',
         label: 'Go back',
+        risk: 'low',
+      },
+      {
+        action_id: 'go_forward',
+        action: 'go_forward',
+        label: 'Go forward',
         risk: 'low',
       },
       {
@@ -242,21 +259,192 @@ export class ActionDiscovery {
         action: 'invalidate_cache',
         label: 'Invalidate semantic cache',
         risk: 'medium',
+      },
+      // Concept §5.6: Compound actions
+      {
+        action_id: 'multi_click',
+        action: 'multi_click',
+        label: 'Click multiple targets',
+        params: {
+          schema: {
+            element_ids: 'string[]',
+            on_failure: 'continue|fail?',
+            continue_on_error: 'boolean?',
+          },
+        },
+        risk: 'low',
+      },
+      {
+        action_id: 'sequence',
+        action: 'sequence',
+        label: 'Run action sequence',
+        params: {
+          schema: {
+            steps: 'object[]',
+            stop_on_error: 'boolean?',
+          },
+        },
+        risk: 'medium',
+      },
+      {
+        action_id: 'parallel',
+        action: 'parallel',
+        label: 'Run safe actions in parallel',
+        params: {
+          schema: {
+            steps: 'object[]',
+            continue_on_error: 'boolean?',
+          },
+        },
+        risk: 'medium',
+      },
+      {
+        action_id: 'if',
+        action: 'if',
+        label: 'Run conditional action',
+        params: {
+          schema: {
+            condition: 'object',
+            then: 'object?',
+            else: 'object?',
+          },
+        },
+        risk: 'low',
+      },
+      {
+        action_id: 'loop',
+        action: 'loop',
+        label: 'Run bounded loop',
+        params: {
+          schema: {
+            while: 'object',
+            do: 'object',
+            max_iterations: 'number?',
+            delay_ms: 'number?',
+          },
+        },
+        risk: 'low',
+      },
+      {
+        action_id: 'navigate_and_extract',
+        action: 'navigate_and_extract',
+        label: 'Navigate and extract content',
+        params: {
+          schema: {
+            url: 'string',
+            extract_selector: 'string?',
+            wait_ms: 'number?',
+          },
+        },
+        risk: 'medium',
+      },
+      {
+        action_id: 'login_flow',
+        action: 'login_flow',
+        label: 'Multi-step login',
+        params: {
+          schema: {
+            url: 'string',
+            credentials: 'object',
+            form_id: 'string?',
+            submit_id: 'string?',
+            success_url: 'string?',
+            success_element: 'string?',
+          },
+        },
+        risk: 'medium',
+      },
+      // Concept §5.7: Async actions
+      {
+        action_id: 'async_navigate',
+        action: 'async_navigate',
+        label: 'Navigate in background',
+        params: {
+          schema: {
+            url: 'string',
+            timeout_ms: 'number?',
+            estimated_time_ms: 'number?',
+          },
+        },
+        risk: 'medium',
+      },
+      // Concept §5.8: Script system
+      {
+        action_id: 'define_script',
+        action: 'define_script',
+        label: 'Define reusable script',
+        params: {
+          schema: {
+            name: 'string',
+            steps: 'object[]',
+            params: 'string[]?',
+          },
+        },
+        risk: 'low',
+      },
+      {
+        action_id: 'call_script',
+        action: 'call_script',
+        label: 'Call named script',
+        params: {
+          schema: {
+            name: 'string',
+            args: 'object?',
+          },
+        },
+        risk: 'medium',
+      },
+      {
+        action_id: 'try',
+        action: 'try',
+        label: 'Try-catch error handling',
+        params: {
+          schema: {
+            do: 'object',
+            catch: 'object|object[]?',
+          },
+        },
+        risk: 'low',
       }
     );
 
-    return actions;
+    return actions.map((action) => {
+      const risk_score = action.risk_score ?? riskScoreForAction(action.action);
+      return {
+        ...action,
+        risk: risk_score >= 70 ? 'high' : risk_score >= 30 ? 'medium' : 'low',
+        risk_score,
+      };
+    });
   }
 
   private targeted(action: string, element: SemanticElement, label: string, params?: Record<string, any>): AvailableAction {
+    const riskScore = riskScoreForAction(action);
+    const actionParams = params ?? (action === 'click'
+      ? { schema: { button: 'left|right|middle?', click_count: 'number?', timeout_ms: 'number?' } }
+      : undefined);
     return {
       action_id: `${action}_${element.id}`,
       action,
       target: element.id,
       label,
-      params,
-      preconditions: ['element_visible', 'element_enabled'],
-      risk: action === 'navigate' || action === 'submit' || action === 'interact' ? 'medium' : 'low',
+      params: actionParams,
+      preconditions: preconditionsFor(action),
+      risk: riskScore >= 70 ? 'high' : riskScore >= 30 ? 'medium' : 'low',
+      risk_score: riskScore,
     };
   }
+}
+
+function preconditionsFor(action: string): string[] {
+  if (action === 'navigate' || action === 'download') {
+    return ['element_visible', 'element_enabled', 'element_stable', 'no_modal_open', 'page_loaded'];
+  }
+  if (action === 'submit' || action === 'fill_form' || action === 'fill_and_verify') {
+    return ['element_visible', 'element_enabled', 'element_stable', 'no_modal_open', 'page_loaded'];
+  }
+  if (action === 'scroll_to_element') {
+    return ['element_exists', 'page_loaded'];
+  }
+  return ['element_visible', 'element_enabled', 'element_stable', 'no_modal_open', 'page_loaded'];
 }

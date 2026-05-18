@@ -32,6 +32,7 @@ export interface AvailableAction {
   params?: ActionParam;
   preconditions?: string[];
   risk?: 'low' | 'medium' | 'high';
+  risk_score?: number;
   source?: {
     type: 'core' | 'plugin' | 'sam';
     plugin?: string;
@@ -227,6 +228,8 @@ export type StreamEventType =
   | 'runtime_event'
   | 'page_changed'
   | 'action_completed'
+  | 'action_retry'
+  | 'action_failed'
   | 'error'
   | 'security'
   | 'heartbeat';

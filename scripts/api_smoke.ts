@@ -96,6 +96,14 @@ async function main() {
       },
     });
 
+    const fillVerify = await restAction(baseUrl, activeSessionId, {
+      action: 'fill_and_verify',
+      target_id: 'contact',
+      params: {
+        fields: { email: 'verify@example.com' },
+      },
+    });
+
     const search = await restAction(baseUrl, activeSessionId, {
       action: 'search_and_paginate',
       target_id: 'search',
@@ -128,6 +136,27 @@ async function main() {
         condition: { type: 'element_text_contains', element_id: 'status', text: 'clicked' },
         timeout_ms: 1000,
         poll_interval_ms: 50,
+      },
+    });
+
+    const defineScript = await restAction(baseUrl, activeSessionId, {
+      action: 'define_script',
+      params: {
+        name: 'click_add',
+        steps: [{ action: 'click', target_id: 'add-button' }],
+      },
+    });
+    const callScript = await restAction(baseUrl, activeSessionId, {
+      action: 'call_script',
+      params: {
+        name: 'click_add',
+      },
+    });
+    const tryFallback = await restAction(baseUrl, activeSessionId, {
+      action: 'try',
+      params: {
+        do: { action: 'unsupported_action' },
+        catch: [{ error_code: '*', fallback: { action: 'wait', params: { ms: 10 } } }],
       },
     });
 
@@ -334,6 +363,7 @@ async function main() {
       },
       rest_type: summarizeRpc(restType),
       fill_form: summarizeRpc(fillForm),
+      fill_and_verify: summarizeRpc(fillVerify),
       search: {
         status: search.status,
         pages_collected: search.data?.pages_collected,
@@ -345,6 +375,11 @@ async function main() {
         status: waitFor.status,
         elapsed_ms: waitFor.data?.elapsed_ms,
         timing: waitFor.timing,
+      },
+      scripts: {
+        defined: defineScript.data?.registered,
+        called: summarizeRpc(callScript),
+        try_fallback: summarizeRpc(tryFallback),
       },
       async_wait: {
         started: asyncWait.status,

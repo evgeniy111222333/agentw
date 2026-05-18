@@ -9,6 +9,7 @@ describe('CommandRouter', () => {
         session_id: 'session',
         status: 'active',
         updated_at: new Date().toISOString(),
+        current_url: 'https://example.com/start',
         tabs: [],
         history: [],
         cookies: [],
@@ -66,5 +67,69 @@ describe('CommandRouter', () => {
     ).rejects.toMatchObject({
       code: 'MISSING_PARAM',
     });
+  });
+
+  it('starts async_navigate through the shared operation store', async () => {
+    const state = {
+      session_id: 'session',
+      status: 'active',
+      updated_at: new Date().toISOString(),
+      current_url: 'https://example.com/start',
+      tabs: [{ tab_id: 'tab-1', url: 'https://example.com/start', title: 'Start', active: true }],
+      history: [],
+      cookies: [],
+      configuration: {},
+    };
+    const asyncRouter = new CommandRouter(
+      {
+        listTabs: jest.fn(async () => state.tabs),
+        getPage: jest.fn(() => ({})),
+        getViewport: jest.fn(() => ({ width: 1280, height: 720 })),
+      } as any,
+      {
+        getActionHistory: () => [],
+        getSessionState: () => state,
+        recordAction: jest.fn(),
+        syncTabs: jest.fn(),
+        recordPageState: jest.fn(),
+        updateSession: jest.fn(),
+      } as any,
+      {
+        executeAction: jest.fn(async () => ({ action: 'navigate', duration_ms: 1, data: { url: 'https://example.com/slow' } })),
+      } as any,
+      {
+        createSnapshot: jest.fn(async () => ({
+          snapshot_id: 'snap-async',
+          version: '2.2.0',
+          url: 'https://example.com/slow',
+          title: 'Slow',
+          timestamp: new Date().toISOString(),
+          elements: [],
+          available_actions: [],
+          session: { session_id: 'session', tab_id: 'tab-1', tabs_count: 1, history_length: 0, cookies_count: 0 },
+          meta: { extraction_time: 1 },
+        })),
+      } as any,
+      new Map()
+    );
+
+    const result = await asyncRouter.execute({
+      action: 'async_navigate',
+      session_id: 'session',
+      action_params: {
+        url: 'https://example.com/slow',
+        estimated_time_ms: 1234,
+      },
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      status: 'started',
+      action: 'async_navigate',
+      state: 'running',
+      estimated_time_ms: 1234,
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(asyncRouter.getOp((result as any).operation_id)?.state).toBe('done');
   });
 });

@@ -19,6 +19,7 @@ describe('ActionValidator', () => {
       { id: 'hidden-panel', type: 'text', text: 'Secret content', visible: false },
       { id: 'product-title', type: 'heading', text: 'Premium Widget' },
       { id: 'category-select', type: 'select', label: 'Category' },
+      { id: 'moving-btn', type: 'button', label: 'Moving', visible: true, stable: false },
       { id: 'search-btn', type: 'button', label: 'Search' },
     ],
   };
@@ -90,6 +91,11 @@ describe('ActionValidator', () => {
       const result = validator.validate('select', 'category-select', { value: 'electronics' }, snapshot);
       expect(result.valid).toBe(true);
     });
+
+    it('should pass when selecting by label', () => {
+      const result = validator.validate('select', 'category-select', { label: 'Electronics' }, snapshot);
+      expect(result.valid).toBe(true);
+    });
   });
 
   describe('Parameter validation', () => {
@@ -114,6 +120,33 @@ describe('ActionValidator', () => {
       const result = validator.validate('keyboard', undefined, {}, undefined);
       expect(result.valid).toBe(false);
       expect(result.error?.code).toBe('MISSING_PARAM');
+    });
+  });
+
+  describe('Preconditions and risk', () => {
+    it('should fail when a modal blocks a targeted action', () => {
+      const result = validator.validate('click', 'buy-btn', {}, {
+        ...snapshot,
+        elements: [
+          ...snapshot.elements,
+          { id: 'blocking-modal', type: 'modal', label: 'Confirm', visible: true },
+        ],
+      });
+      expect(result.valid).toBe(false);
+      expect(result.error?.code).toBe('MODAL_OPEN');
+    });
+
+    it('should fail when element_stable precondition is not satisfied', () => {
+      const result = validator.validate('click', 'moving-btn', {}, snapshot);
+      expect(result.valid).toBe(false);
+      expect(result.error?.code).toBe('ELEMENT_NOT_STABLE');
+    });
+
+    it('should block medium-risk actions during degradation', () => {
+      const result = validator.validate('navigate', undefined, { url: 'https://x.com' }, undefined, 'moderate');
+      expect(result.valid).toBe(false);
+      expect(result.error?.code).toBe('ACTION_PRECONDITION_FAILED');
+      expect(result.error?.context?.risk_score).toBeGreaterThanOrEqual(30);
     });
   });
 

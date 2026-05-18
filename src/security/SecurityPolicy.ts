@@ -16,11 +16,16 @@ const operatorActions = new Set([
   ...viewerActions,
   'click',
   'cancel',
+  'async_navigate',
+  'call_script',
   'fill_form',
+  'fill_and_verify',
+  'define_script',
   'download',
   'file_system',
   'fs',
   'go_back',
+  'go_forward',
   'hover',
   'interact',
   'if',
@@ -29,6 +34,7 @@ const operatorActions = new Set([
   'loop',
   'multi_click',
   'navigate',
+  'navigate_and_extract',
   'new_tab',
   'open_tab',
   'parallel',
@@ -49,9 +55,11 @@ const operatorActions = new Set([
   'submit',
   'switch_tab',
   'type',
+  'try',
   'upload',
   'wait',
   'wait_for',
+  'login_flow',
 ]);
 
 export class SecurityPolicy {
@@ -92,11 +100,17 @@ export class SecurityPolicy {
       });
     }
 
-    if (command.action === 'navigate' || ((command.action === 'open_tab' || command.action === 'new_tab') && command.action_params?.url !== undefined)) {
-      this.checkDomain(command.action_params?.url);
+    if (
+      command.action === 'navigate' ||
+      command.action === 'async_navigate' ||
+      command.action === 'navigate_and_extract' ||
+      command.action === 'login_flow' ||
+      ((command.action === 'open_tab' || command.action === 'new_tab') && command.action_params?.url !== undefined)
+    ) {
+      this.checkDomain(command.action_params?.url ?? command.action_params?.login_url, state.current_url);
     }
     for (const url of collectNestedNavigateUrls(command.action_params)) {
-      this.checkDomain(url);
+      this.checkDomain(url, state.current_url);
     }
 
     const rateLimit = this.consumeRateLimit(command.session_id, command.action);
@@ -143,7 +157,7 @@ export class SecurityPolicy {
     };
   }
 
-  private checkDomain(urlValue: unknown): void {
+  private checkDomain(urlValue: unknown, baseUrl?: string): void {
     if (typeof urlValue !== 'string') {
       throw new LlmBrowserError('MISSING_PARAM', 'url is required for navigate');
     }
@@ -154,9 +168,9 @@ export class SecurityPolicy {
 
     let hostname = '';
     try {
-      hostname = new URL(urlValue).hostname.toLowerCase();
+      hostname = new URL(urlValue, baseUrl || undefined).hostname.toLowerCase();
     } catch {
-      throw new LlmBrowserError('INVALID_PARAMS', 'navigate url must be absolute or data URL');
+      throw new LlmBrowserError('INVALID_PARAMS', 'navigate url must be absolute, relative to current page, or data URL');
     }
 
     const { domain_blacklist, domain_whitelist } = ConfigurationManager.getInstance().getConfig().security;
@@ -189,8 +203,14 @@ function collectNestedNavigateUrls(params: unknown, depth = 0): unknown[] {
   const visitStep = (step: any) => {
     if (!step || typeof step !== 'object') return;
     const stepParams = step.params ?? step.action_params ?? step.parameters ?? {};
-    if (step.action === 'navigate' || ((step.action === 'open_tab' || step.action === 'new_tab') && stepParams.url !== undefined)) {
-      urls.push(stepParams.url);
+    if (
+      step.action === 'navigate' ||
+      step.action === 'async_navigate' ||
+      step.action === 'navigate_and_extract' ||
+      step.action === 'login_flow' ||
+      ((step.action === 'open_tab' || step.action === 'new_tab') && stepParams.url !== undefined)
+    ) {
+      urls.push(stepParams.url ?? stepParams.login_url);
     }
     urls.push(...collectNestedNavigateUrls(stepParams, depth + 1));
   };
@@ -199,9 +219,12 @@ function collectNestedNavigateUrls(params: unknown, depth = 0): unknown[] {
   visitStep(value.then);
   visitStep(value.else);
   visitStep(value.do);
+  for (const handler of arrayOf(value.catch)) visitStep(handler.action ?? handler.fallback ?? handler);
+  if (value.fallback) visitStep(value.fallback);
   return urls;
 }
 
 function arrayOf(value: unknown): any[] {
-  return Array.isArray(value) ? value : [];
+  if (Array.isArray(value)) return value;
+  return value && typeof value === 'object' ? [value] : [];
 }

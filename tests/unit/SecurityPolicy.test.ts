@@ -54,6 +54,48 @@ describe('SecurityPolicy', () => {
     ).toThrow(expect.objectContaining({ code: 'SECURITY_VIOLATION' }));
   });
 
+  it('resolves relative navigation URLs against the current session URL', () => {
+    const state = new StateManagementLayer();
+    state.registerSession('session');
+    state.updateSession('session', { current_url: 'https://allowed.test/app/start' });
+    const policy = new SecurityPolicy(state);
+    configManager.updateConfig({
+      security: {
+        ...originalSecurity,
+        domain_whitelist: ['allowed.test'],
+      },
+    });
+
+    expect(() =>
+      policy.authorize({
+        action: 'navigate_and_extract',
+        session_id: 'session',
+        action_params: { url: '/reports' },
+      })
+    ).not.toThrow();
+  });
+
+  it('allows script and compound actions for operator sessions', () => {
+    const state = new StateManagementLayer();
+    state.registerSession('session');
+    const policy = new SecurityPolicy(state);
+
+    expect(() =>
+      policy.authorize({
+        action: 'define_script',
+        session_id: 'session',
+        action_params: { name: 'x', steps: [] },
+      })
+    ).not.toThrow();
+    expect(() =>
+      policy.authorize({
+        action: 'login_flow',
+        session_id: 'session',
+        action_params: { url: 'https://example.com/login', credentials: { email: 'a' } },
+      })
+    ).not.toThrow();
+  });
+
   it('enforces per-session token bucket limits', () => {
     const state = new StateManagementLayer();
     state.registerSession('session');

@@ -27,6 +27,7 @@ export interface FlowReport {
 
 export const FLOW_ACTIONS = new Set([
   'fill_form',
+  'fill_and_verify',
   'multi_click',
   'sequence',
   'parallel',
@@ -34,6 +35,13 @@ export const FLOW_ACTIONS = new Set([
   'loop',
   'wait_for',
   'search_and_paginate',
+  'navigate_and_extract',
+  'login_flow',
+  'async_navigate',
+  'try',
+  'define_script',
+  'call_script',
+  'noop',
 ]);
 
 export const PAR_ACTIONS = new Set([

@@ -46,6 +46,7 @@ async function main() {
 
     const typed = await session.type(inputAction.target, 'sdk@example.com');
     const filled = await session.fillForm('profile', { email: 'flow-sdk@example.com' });
+    const fillVerified = await session.fillAndVerify('profile', { email: 'verified-sdk@example.com' });
     const sequence = await session.sequence([
       { action: 'wait', params: { ms: 25 } },
       { action: 'click', target_id: 'save-button' },
@@ -59,6 +60,12 @@ async function main() {
     const asyncDone = await pollUntilDone(session, asyncWait.operation_id);
     const cancelStart = await session.start('wait', { params: { ms: 500 } });
     const cancelled = await session.cancel(cancelStart.operation_id);
+    const defined = await session.defineScript('save_again', [{ action: 'click', target_id: 'save-button' }]);
+    const called = await session.callScript('save_again');
+    const recovered = await session.tryAction(
+      { action: 'unsupported_action' },
+      [{ error_code: '*', fallback: { action: 'wait', params: { ms: 10 } } }]
+    );
     const samExecuted = await client.executeAction(session.id, 'save_profile', { target_id: samAction.target });
     const clicked = await session.click('save-button');
     const fsWrite = await session.fs('write', '/uploads/sdk.txt', { content: 'sdk-upload' });
@@ -127,6 +134,7 @@ async function main() {
           },
           typed: summarize(typed),
           filled: summarize(filled),
+          fill_verified: summarize(fillVerified),
           sequence: summarize(sequence),
           waited: {
             status: waited.status,
@@ -140,6 +148,11 @@ async function main() {
           cancelled_op: {
             started: cancelStart.status,
             final_status: cancelled.status,
+          },
+          scripts: {
+            defined: defined.data?.registered,
+            called: summarize(called),
+            recovered: summarize(recovered),
           },
           sam_executed: summarize(samExecuted),
           clicked: summarize(clicked),
