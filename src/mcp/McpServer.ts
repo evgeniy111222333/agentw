@@ -30,6 +30,8 @@ import { ConfigurationManager } from '../config/ConfigurationManager';
 import { createDefaultPluginRegistry } from '../plugins/PluginRegistry';
 import { SemanticSnapshot } from '../common/types';
 import { randomUUID } from 'crypto';
+import { DiagnosticsDashboard } from '../obs/DiagnosticsDashboard';
+import { StateReconciler } from '../layer3_state_management/StateReconciler';
 
 export class McpServer {
   private server: Server;
@@ -40,6 +42,7 @@ export class McpServer {
   private activeSessionId: string | null = null;
   private initialized = false;
   private lastSnapshots: Map<string, SemanticSnapshot> = new Map();
+  private dashboard: DiagnosticsDashboard;
 
   constructor() {
     this.browserCore = new BrowserCore();
@@ -49,6 +52,12 @@ export class McpServer {
       ConfigurationManager.getInstance().getConfig().plugin_registry
     );
     this.semanticLayer = new SemanticLayer({ pluginRegistry });
+    this.dashboard = new DiagnosticsDashboard(
+      this.browserCore,
+      this.stateManager,
+      new StateReconciler(),
+      this.lastSnapshots
+    );
 
     this.server = new Server(
       {
@@ -155,6 +164,19 @@ export class McpServer {
             },
           },
         },
+        {
+          name: 'browser_diagnostics',
+          description: 'Get real-time system diagnostics, health scores, performance metrics, and session states.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              summary_only: {
+                type: 'boolean',
+                description: 'If true, returns a compact LLM-friendly summary instead of the full report (default: false)',
+              },
+            },
+          },
+        },
       ],
     }));
 
@@ -176,6 +198,8 @@ export class McpServer {
             return await this.handleListTabs();
           case 'browser_screenshot':
             return await this.handleScreenshot(args as any);
+          case 'browser_diagnostics':
+            return await this.handleDiagnostics(args as any);
           default:
             return {
               content: [{ type: 'text', text: `Unknown tool: ${name}` }],
@@ -360,6 +384,18 @@ export class McpServer {
           type: 'image',
           data: result.data?.image,
           mimeType: 'image/png',
+        },
+      ],
+    };
+  }
+
+  private async handleDiagnostics(args: { summary_only?: boolean }): Promise<any> {
+    const report = args.summary_only ? this.dashboard.summary() : this.dashboard.report();
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(report, null, 2),
         },
       ],
     };

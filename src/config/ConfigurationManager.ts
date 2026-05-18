@@ -22,6 +22,9 @@ export interface SemanticConfig {
   cache_enabled: boolean;
   cache_ttl_ms: number;
   cache_max_entries: number;
+  token_budget: {
+    max_tokens: number;
+  };
 }
 
 export interface SecurityConfig {
@@ -112,6 +115,9 @@ export class ConfigurationManager {
         cache_enabled: envBoolean('LLM_BROWSER_SEMANTIC_CACHE_ENABLED', true),
         cache_ttl_ms: envNumber('LLM_BROWSER_SEMANTIC_CACHE_TTL_MS', 30000),
         cache_max_entries: envNumber('LLM_BROWSER_SEMANTIC_CACHE_MAX_ENTRIES', 250),
+        token_budget: {
+          max_tokens: envNumber('LLM_BROWSER_MAX_TOKENS', 8000),
+        },
       },
       security: {
         rate_limit_per_minute: envNumber('LLM_BROWSER_RATE_LIMIT_PER_MINUTE', 60),

@@ -4,6 +4,7 @@ import { ActionExecutor, ActionExecutionResult } from '../layer2_action_executio
 import { ActionValidator } from '../layer2_action_execution/ActionValidator';
 import { StateManagementLayer } from '../layer3_state_management/StateManagementLayer';
 import { SemanticLayer } from '../layer4_semantic/SemanticLayer';
+import { StateReconciler } from '../layer3_state_management/StateReconciler';
 import { globalMetrics } from '../common/MetricsRegistry';
 import { ActionRecord, AvailableAction, SemanticSnapshot, SessionInfo } from '../common/types';
 import { LlmBrowserError, normalizeError } from '../common/errors';
@@ -176,7 +177,8 @@ export class CommandRouter {
     private previousSnapshots: Map<string, SemanticSnapshot>,
     private securityPolicy = new SecurityPolicy(stateManager),
     private ops = new OpStore<CommandResult>(),
-    private actionValidator = new ActionValidator()
+    private actionValidator = new ActionValidator(),
+    private stateReconciler = new StateReconciler()
   ) {}
 
   async execute(command: AgentCommand): Promise<RouterResult> {
@@ -388,7 +390,22 @@ export class CommandRouter {
       await this.syncTabs(command.session_id);
       const page = this.browserCore.getPage(command.session_id);
       const active = activeTab(this.stateManager.getSessionState(command.session_id));
-      const previousSnapshot = active ? this.previousSnapshots.get(snapKey(command.session_id, active.tab_id)) : undefined;
+      let previousSnapshot = active ? this.previousSnapshots.get(snapKey(command.session_id, active.tab_id)) : undefined;
+
+      // State Reconciliation Pipeline (Concept 2.9)
+      if (previousSnapshot && activeAction.executionAction !== 'snapshot') {
+        const reconciliation = await this.traceAsync(
+          traceId,
+          'reconciler.check',
+          {},
+          () => this.stateReconciler.reconcile(page, command.session_id, previousSnapshot)
+        );
+        if (!reconciliation.valid) {
+          previousSnapshot = undefined; // Force full extraction
+          this.previousSnapshots.delete(snapKey(command.session_id, active!.tab_id));
+        }
+      }
+
       const snapshot = await this.traceAsync(
         traceId,
         'semantic.extract',

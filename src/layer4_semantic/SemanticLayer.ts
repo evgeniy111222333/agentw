@@ -7,6 +7,7 @@ import { ContentExtractor } from './extractor/ContentExtractor';
 import { DOMTraverser } from './traverser/DOMTraverser';
 import { IncrementalUpdater } from './diff/IncrementalUpdater';
 import { SmartWait } from './stabilization/SmartWait';
+import { TokenBudgetManager } from './budget/TokenBudgetManager';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { SemanticElement, SemanticSnapshot, SessionInfo, SnapshotMeta } from '../common/types';
 import { globalEventBus } from '../common/EventBus';
@@ -47,6 +48,7 @@ export class SemanticLayer {
   private authTracker: AuthTracker;
   private incrementalUpdater: IncrementalUpdater;
   private smartWait: SmartWait;
+  private tokenBudgetManager: TokenBudgetManager;
 
   constructor(dependencies: SemanticLayerDependencies = {}) {
     const config = ConfigurationManager.getInstance().getConfig();
@@ -59,6 +61,7 @@ export class SemanticLayer {
     this.authTracker = dependencies.authTracker ?? new AuthTracker();
     this.incrementalUpdater = new IncrementalUpdater(this.traverser, this.classifier, this.extractor);
     this.smartWait = new SmartWait();
+    this.tokenBudgetManager = new TokenBudgetManager();
   }
 
   async createSnapshot(page: Page, options: SnapshotBuildOptions): Promise<SemanticSnapshot> {
@@ -149,7 +152,7 @@ export class SemanticLayer {
       url: page.url(),
       title,
       timestamp,
-      elements,
+      elements: [], // Replaced below after budgeting
       available_actions: availableActions,
       session: options.session,
       forms: collectForms(elements),
@@ -159,6 +162,13 @@ export class SemanticLayer {
     snapshot.auth = await this.authTracker.inspect(page, snapshot);
     recordAuthMetrics(snapshot.auth.authenticated);
     const privacy = maskSnapshot(snapshot);
+
+    // Apply Token Budget (Concept 2.7)
+    const budgetConfig = ConfigurationManager.getInstance().getConfig().semantic.token_budget;
+    const budgetResult = this.tokenBudgetManager.applyBudget(elements, {
+      max_tokens: budgetConfig?.max_tokens,
+    });
+    snapshot.elements = budgetResult.elements;
 
     const extractionTime = Math.round(performance.now() - extractionStart);
     const meta: SnapshotMeta = {
@@ -192,10 +202,17 @@ export class SemanticLayer {
         ...pluginResult.stats,
         plugins: pluginResult.metadata,
       },
+      budget: {
+        estimated_tokens: budgetResult.estimated_tokens,
+        budget_used_pct: budgetResult.budget_used_pct,
+        pruned_elements: budgetResult.pruned_count,
+        pruning_applied: budgetResult.pruning_applied,
+      },
       privacy,
     };
 
     snapshot.meta = dropUndefined(meta);
+    snapshot.meta.token_estimate = this.tokenBudgetManager.estimateSnapshotTokens(snapshot);
     if (traversal.stats.closed_shadow_roots > 0) {
       void globalEventBus.publish('stream_event', {
         type: 'security',

@@ -111,6 +111,12 @@ export interface SnapshotMeta {
     warnings: number;
     plugins: Record<string, any>;
   };
+  budget?: {
+    estimated_tokens: number;
+    budget_used_pct: number;
+    pruned_elements: number;
+    pruning_applied: boolean;
+  };
   privacy?: PrivacyStats;
 }
 
