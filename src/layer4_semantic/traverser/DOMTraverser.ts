@@ -223,7 +223,7 @@ function mergeResults(results: TraversalResult[], frameDescriptors: FrameDescrip
     max_elements: maxElements,
     max_elements_requested: first?.stats.max_elements_requested,
     iframe_count: total.iframe_count + result.stats.iframe_count,
-    iframe_in_output_count: total.iframe_in_output_count + result.stats.iframe_in_output_count,
+    iframe_in_output_count: nodes.filter(n => n.iframe).length,
     iframe_extracted_count: total.iframe_extracted_count + (result === first ? 0 : 1),
     iframe_skipped_ads: total.iframe_skipped_ads + result.stats.iframe_skipped_ads,
     iframe_depth_limited: total.iframe_depth_limited + result.stats.iframe_depth_limited,
@@ -344,6 +344,14 @@ function classifyFrame(
   ) {
     return { iframe_type: 'ad', status: 'blocked' };
   }
+  // Auth/payment/captcha MUST be checked before content embeds —
+  // a Google sign-in iframe with "youtube.com" in its continue= param
+  // must be classified as 'auth', not as 'content/youtube'.
+  if (/stripe\.com|paypal\.com|checkout|payment|braintree|adyen|klarna/.test(value)) {
+    return { iframe_type: 'payment', status: 'metadata_only' };
+  }
+  if (/recaptcha|hcaptcha|captcha|arkoselabs/.test(value)) return { iframe_type: 'captcha', status: 'metadata_only' };
+  if (/okta|auth0|login\.microsoftonline|accounts\.google|signin|sso/.test(value)) return { iframe_type: 'auth', status: 'metadata_only' };
   if (/youtube\.com|youtu\.be|youtube-nocookie\.com/.test(value)) {
     return { iframe_type: 'content', embed_type: 'youtube', status: 'metadata_only', video_id: youtubeId(src ?? resolvedUrl ?? '') };
   }
@@ -354,11 +362,6 @@ function classifyFrame(
   if (/facebook\.com|platform\.twitter\.com|x\.com\/i\/frames|instagram\.com|linkedin\.com/.test(value)) {
     return { iframe_type: 'content', embed_type: 'social', status: 'metadata_only' };
   }
-  if (/stripe\.com|paypal\.com|checkout|payment|braintree|adyen|klarna/.test(value)) {
-    return { iframe_type: 'payment', status: 'metadata_only' };
-  }
-  if (/recaptcha|hcaptcha|captcha|arkoselabs/.test(value)) return { iframe_type: 'captcha', status: 'metadata_only' };
-  if (/okta|auth0|login\.microsoftonline|accounts\.google|signin|sso/.test(value)) return { iframe_type: 'auth', status: 'metadata_only' };
   return { iframe_type: 'unknown', status: 'metadata_only' };
 }
 
@@ -439,6 +442,12 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     ) {
       return { iframe_type: 'ad', status: 'blocked' };
     }
+    // Auth/payment/captcha MUST be checked before content embeds —
+    // a Google sign-in iframe with "youtube.com" in its continue= param
+    // must be classified as 'auth', not as 'content/youtube'.
+    if (/stripe\.com|paypal\.com|checkout|payment|braintree|adyen|klarna/.test(value)) return { iframe_type: 'payment', status: 'metadata_only' };
+    if (/recaptcha|hcaptcha|captcha|arkoselabs/.test(value)) return { iframe_type: 'captcha', status: 'metadata_only' };
+    if (/okta|auth0|login\.microsoftonline|accounts\.google|signin|sso/.test(value)) return { iframe_type: 'auth', status: 'metadata_only' };
     if (/youtube\.com|youtu\.be|youtube-nocookie\.com/.test(value)) {
       return { iframe_type: 'content', embed_type: 'youtube', status: 'metadata_only', video_id: youtubeIdInPage(src ?? resolvedUrl ?? '') };
     }
@@ -449,9 +458,6 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     if (/facebook\.com|platform\.twitter\.com|x\.com\/i\/frames|instagram\.com|linkedin\.com/.test(value)) {
       return { iframe_type: 'content', embed_type: 'social', status: 'metadata_only' };
     }
-    if (/stripe\.com|paypal\.com|checkout|payment|braintree|adyen|klarna/.test(value)) return { iframe_type: 'payment', status: 'metadata_only' };
-    if (/recaptcha|hcaptcha|captcha|arkoselabs/.test(value)) return { iframe_type: 'captcha', status: 'metadata_only' };
-    if (/okta|auth0|login\.microsoftonline|accounts\.google|signin|sso/.test(value)) return { iframe_type: 'auth', status: 'metadata_only' };
     return { iframe_type: 'unknown', status: 'metadata_only' };
   };
   const extractAttributes = (el: HTMLElement, attrs: Set<string>): Record<string, string> => {
@@ -783,7 +789,8 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     const visible = isElementVisible(el, style, rect);
     if (!visible) {
       skippedInvisible += 1;
-      if (config.visible_only) continue;
+      const importantIframe = iframe && ['auth', 'payment', 'captcha', 'content'].includes(iframe.iframe_type);
+      if (config.visible_only && !importantIframe) continue;
     }
 
     const inViewport = rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
@@ -864,6 +871,14 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
       list: extractList(el, normalizeText),
     }));
   }
+
+  // Prioritize iframe and shadow_host nodes so they survive the maxElements cap
+  // applied by mergeResults. Without this, iframes at the end of DOM get cut.
+  nodes.sort((a, b) => {
+    const aPriority = (a.iframe || a.shadow) ? 0 : 1;
+    const bPriority = (b.iframe || b.shadow) ? 0 : 1;
+    return aPriority - bPriority;
+  });
 
   const rawDomBytes = new TextEncoder().encode(rawDomWithShadow(entries)).length;
 

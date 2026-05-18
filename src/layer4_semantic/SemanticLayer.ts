@@ -164,6 +164,7 @@ export class SemanticLayer {
       viewport: options.session.viewport,
       encapsulation: {
         iframe_count: traversal.stats.iframe_count,
+        iframe_in_output_count: traversal.stats.iframe_in_output_count,
         iframe_extracted_count: traversal.stats.iframe_extracted_count,
         iframe_skipped_ads: traversal.stats.iframe_skipped_ads,
         iframe_depth_limited: traversal.stats.iframe_depth_limited,
