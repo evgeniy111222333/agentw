@@ -298,7 +298,18 @@ export class McpServer {
     this.lastSnapshots.set(sessionId, snapshot);
 
     if (args.delta_only && snapshot.delta) {
-       // Return conservative update
+       // Strip _hash from any elements embedded in delta operations
+       const cleanDelta = {
+         ...snapshot.delta,
+         operations: snapshot.delta.operations.map(op => {
+           const clean = { ...op };
+           if (clean.element) {
+             const { _hash, ...rest } = clean.element as any;
+             clean.element = rest;
+           }
+           return clean;
+         }),
+       };
        const deltaResponse: any = {
           snapshot_id: snapshot.snapshot_id,
           version: snapshot.version,
@@ -306,7 +317,7 @@ export class McpServer {
           title: snapshot.title,
           timestamp: snapshot.timestamp,
           checksum: snapshot.checksum,
-          delta: snapshot.delta,
+          delta: cleanDelta,
        };
        if (snapshot.delta.stats.actions_changed) {
           deltaResponse.available_actions = snapshot.available_actions;
@@ -321,11 +332,11 @@ export class McpServer {
        };
     }
 
-    // For MCP clients, strip large binary data from full snapshot
+    // For MCP clients, strip internal/heavy fields from elements before transmission
     const cleanSnapshot = {
       ...snapshot,
       elements: snapshot.elements.map((el) => {
-        const { boundingBox, options, rows, ...rest } = el as any;
+        const { boundingBox, options, rows, _hash, ...rest } = el as any;
         return rest;
       }),
     };

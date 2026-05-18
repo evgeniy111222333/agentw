@@ -26,6 +26,7 @@ export interface SnapshotBuildOptions {
   actionTime?: number;
   totalTime?: number;
   traceId?: string;
+  forceRefresh?: boolean;
 }
 
 export interface SemanticLayerDependencies {
@@ -67,10 +68,14 @@ export class SemanticLayer {
   async createSnapshot(page: Page, options: SnapshotBuildOptions): Promise<SemanticSnapshot> {
     const extractionStart = performance.now();
 
-    const incremental = this.incrementalUpdater.getSnapshot(options.session.session_id);
-    // In a full implementation, we'd use StateReconciler here to verify validity.
-    // For now, if we have a valid patched snapshot and we're not forcing a full refresh, we could return it.
-    // To ensure safety, we still do a full snap if plugins require it, but we register the new snap.
+    // Use IncrementalUpdater's in-memory snapshot as the previousSnapshot base
+    // so FNV-1a hashing can skip unchanged subtrees during traversal.
+    if (!options.forceRefresh && !options.previousSnapshot) {
+      const incremental = this.incrementalUpdater.getSnapshot(options.session.session_id);
+      if (incremental) {
+        options = { ...options, previousSnapshot: incremental };
+      }
+    }
 
     await this.stabilizePage(page);
     try {
@@ -248,7 +253,6 @@ export class SemanticLayer {
     }
     const snapshotBytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
     snapshot.meta.snapshot_bytes = snapshotBytes;
-    snapshot.meta.token_estimate = Math.ceil(snapshotBytes / 4);
     snapshot.meta.compression_ratio =
       traversal.stats.raw_dom_bytes > 0 ? Number((snapshotBytes / traversal.stats.raw_dom_bytes).toFixed(4)) : undefined;
 
@@ -306,7 +310,7 @@ export class SemanticLayer {
     delete snapshot.delta;
     const snapshotBytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
     meta.snapshot_bytes = snapshotBytes;
-    meta.token_estimate = Math.ceil(snapshotBytes / 4);
+    meta.token_estimate = this.tokenBudgetManager.estimateSnapshotTokens(snapshot);
     snapshot.checksum = generateChecksum(snapshot.elements);
     snapshot.delta = this.differ.diff(options.previousSnapshot, snapshot);
     if (snapshot.delta) {
