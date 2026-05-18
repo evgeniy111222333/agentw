@@ -92,6 +92,8 @@ export interface SnapshotMeta {
   cache_key?: string;
   cache_age_ms?: number;
   cache_entries?: number;
+  incremental_extraction?: boolean;
+  incremental_cached_nodes?: number;
   incomplete?: boolean;
   trace_id?: string;
   viewport?: ViewportState;
@@ -130,13 +132,20 @@ export interface SemanticDeltaOperation {
     | 'element_add'
     | 'element_remove'
     | 'element_update'
+    | 'update_attr'
     | 'actions_replace'
+    | 'action_add'
+    | 'action_remove'
     | 'metadata_update';
   element_id?: string;
   element?: SemanticElement;
   before?: Partial<SemanticElement>;
   after?: Partial<SemanticElement>;
+  changes?: Array<{ attr: string; old_value: any; new_value: any }>;
+  after_id?: string;
+  before_id?: string;
   actions?: AvailableAction[];
+  action?: AvailableAction;
   metadata?: Record<string, any>;
 }
 
@@ -144,6 +153,7 @@ export interface SemanticDelta {
   from_snapshot_id?: string;
   to_snapshot_id: string;
   timestamp: string;
+  checksum?: string;
   operations: SemanticDeltaOperation[];
   stats: {
     added: number;
@@ -162,6 +172,7 @@ export interface SemanticSnapshot {
   elements: SemanticElement[];
   available_actions: AvailableAction[];
   session: SessionInfo;
+  checksum?: string;
   meta?: SnapshotMeta;
   forms?: any[];
   alerts?: any[];

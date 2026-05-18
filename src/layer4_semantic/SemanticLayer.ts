@@ -2,7 +2,7 @@ import { Page } from 'playwright';
 import { randomUUID } from 'crypto';
 import { ActionDiscovery } from './action_discovery/ActionDiscovery';
 import { ElementClassifier } from './classifier/ElementClassifier';
-import { SnapshotDiffer } from './diff/SnapshotDiffer';
+import { SnapshotDiffer, generateChecksum } from './diff/SnapshotDiffer';
 import { ContentExtractor } from './extractor/ContentExtractor';
 import { DOMTraverser } from './traverser/DOMTraverser';
 import { IncrementalUpdater } from './diff/IncrementalUpdater';
@@ -115,13 +115,32 @@ export class SemanticLayer {
       globalMetrics.increment('llm_browser_semantic_cache_misses_total');
     }
 
-    const traversal = await this.traverser.traverse(page, { maxElements: requestedMaxElements });
+    let previousHashes: Record<string, string> | undefined;
+    const previousElementsMap = new Map<string, SemanticElement>();
+    
+    if (options.previousSnapshot) {
+      previousHashes = {};
+      for (const el of options.previousSnapshot.elements) {
+        if (el._hash) previousHashes[el.id] = el._hash;
+        previousElementsMap.set(el.id, el);
+      }
+    }
+
+    const traversal = await this.traverser.traverse(page, { 
+      maxElements: requestedMaxElements,
+      previousHashes 
+    });
 
     const allElements = traversal.nodes.map((node): SemanticElement => {
+      if (node.type === 'cached' && previousElementsMap.has(node.id)) {
+        return previousElementsMap.get(node.id)!;
+      }
+
       const type = this.classifier.classify(node);
       const content = this.extractor.extract(node, type);
       return {
         id: node.id,
+        _hash: node._hash,
         type,
         role: node.role,
         ...content,
@@ -185,6 +204,8 @@ export class SemanticLayer {
       cache_status: cache ? 'miss' : 'disabled',
       cache_key: cache?.key,
       cache_entries: globalSemCache.stats().entries,
+      incremental_extraction: Boolean(previousHashes),
+      incremental_cached_nodes: traversal.nodes.filter(n => n.type === 'cached').length,
       incomplete,
       trace_id: options.traceId,
       viewport: options.session.viewport,
@@ -231,7 +252,18 @@ export class SemanticLayer {
     snapshot.meta.compression_ratio =
       traversal.stats.raw_dom_bytes > 0 ? Number((snapshotBytes / traversal.stats.raw_dom_bytes).toFixed(4)) : undefined;
 
+    snapshot.checksum = generateChecksum(snapshot.elements);
     snapshot.delta = this.differ.diff(options.previousSnapshot, snapshot);
+    
+    // Concept §6.4: 40% threshold fallback
+    if (snapshot.delta) {
+      const totalElements = Math.max(options.previousSnapshot?.elements.length || 0, snapshot.elements.length);
+      const changed = snapshot.delta.stats.added + snapshot.delta.stats.removed + snapshot.delta.stats.updated;
+      if (totalElements > 0 && changed / totalElements > 0.4) {
+        delete snapshot.delta;
+      }
+    }
+
     if (cache) {
       globalSemCache.set(cache.key, snapshot, config.cache_max_entries);
       globalMetrics.increment('llm_browser_semantic_cache_writes_total');
@@ -275,7 +307,15 @@ export class SemanticLayer {
     const snapshotBytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
     meta.snapshot_bytes = snapshotBytes;
     meta.token_estimate = Math.ceil(snapshotBytes / 4);
+    snapshot.checksum = generateChecksum(snapshot.elements);
     snapshot.delta = this.differ.diff(options.previousSnapshot, snapshot);
+    if (snapshot.delta) {
+      const totalElements = Math.max(options.previousSnapshot?.elements.length || 0, snapshot.elements.length);
+      const changed = snapshot.delta.stats.added + snapshot.delta.stats.removed + snapshot.delta.stats.updated;
+      if (totalElements > 0 && changed / totalElements > 0.4) {
+        delete snapshot.delta;
+      }
+    }
     return snapshot;
   }
 

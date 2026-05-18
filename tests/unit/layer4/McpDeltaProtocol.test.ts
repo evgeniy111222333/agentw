@@ -42,7 +42,7 @@ describe('MCP Delta Transmission Protocol', () => {
     const delta = differ.diff(snap1, snap2);
     expect(delta).toBeDefined();
     expect(delta!.operations.length).toBe(1);
-    expect(delta!.operations[0].op).toBe('element_update');
+    expect(delta!.operations[0].op).toBe('update_attr');
     expect(delta!.operations[0].element_id).toBe('input1');
     expect(delta!.stats.updated).toBe(1);
     expect(delta!.stats.added).toBe(0);

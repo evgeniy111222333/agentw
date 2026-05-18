@@ -110,6 +110,10 @@ export class McpServer {
                 type: 'string',
                 description: 'ID of the last snapshot received. Used to generate a delta.',
               },
+              checksum: {
+                type: 'string',
+                description: 'Checksum of the last snapshot received. Required for strict delta consistency.',
+              },
               delta_only: {
                 type: 'boolean',
                 description: 'If true, returns only the delta operations instead of the full elements array (saves tokens).',
@@ -227,7 +231,7 @@ export class McpServer {
     await this.browserCore.createSession(sessionId);
     this.stateManager.registerSession(sessionId);
     const page = this.browserCore.getPage(sessionId);
-    await this.stateManager.injectMutationObserver(page, sessionId);
+    await this.stateManager.injectAllTrackers(page, sessionId);
     this.activeSessionId = sessionId;
     return sessionId;
   }
@@ -259,6 +263,7 @@ export class McpServer {
     max_elements?: number;
     snapshot_mode?: 'compact' | 'standard' | 'detailed';
     from_snapshot_id?: string;
+    checksum?: string;
     delta_only?: boolean;
   }): Promise<any> {
     const sessionId = await this.ensureSession();
@@ -269,9 +274,11 @@ export class McpServer {
     let previousSnapshot: SemanticSnapshot | undefined;
     if (args.from_snapshot_id) {
        const cached = this.lastSnapshots.get(sessionId);
-       // Simple version check: if the requested ID matches what we sent last time
        if (cached && cached.snapshot_id === args.from_snapshot_id) {
-           previousSnapshot = cached;
+           // Concept §6.4 Checksum validation
+           if (!args.checksum || cached.checksum === args.checksum) {
+               previousSnapshot = cached;
+           }
        }
     }
 
@@ -298,6 +305,7 @@ export class McpServer {
           url: snapshot.url,
           title: snapshot.title,
           timestamp: snapshot.timestamp,
+          checksum: snapshot.checksum,
           delta: snapshot.delta,
        };
        if (snapshot.delta.stats.actions_changed) {

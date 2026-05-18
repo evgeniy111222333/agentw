@@ -36,10 +36,9 @@ describe('SnapshotDiffer', () => {
     expect(delta?.operations).toContainEqual(expect.objectContaining({
       op: 'element_remove',
       element_id: 'old',
-      before: expect.objectContaining({ type: 'button' }),
     }));
-    expect(delta?.operations).toContainEqual(expect.objectContaining({ op: 'element_update', element_id: 'title' }));
-    expect(delta?.operations).toContainEqual(expect.objectContaining({ op: 'actions_replace' }));
+    expect(delta?.operations).toContainEqual(expect.objectContaining({ op: 'update_attr', element_id: 'title' }));
+    expect(delta?.operations).toContainEqual(expect.objectContaining({ op: 'action_add' }));
   });
 });
 

@@ -3,6 +3,8 @@ import { ConfigurationManager } from '../../config/ConfigurationManager';
 
 export interface TraversedNode {
   id: string;
+  type?: 'cached';
+  _hash?: string;
   tagName: string;
   role?: string;
   label?: string;
@@ -103,6 +105,7 @@ export interface TraversalResult {
 
 export interface TraverseOptions {
   maxElements?: number;
+  previousHashes?: Record<string, string>;
 }
 
 interface FrameDescriptor {
@@ -136,6 +139,7 @@ export class DOMTraverser {
       include_iframes: semanticConfig.include_iframes !== false,
       max_frame_depth: Math.max(0, Number(semanticConfig.max_frame_depth ?? 3)),
       max_elements_override: options.maxElements,
+      previousHashes: options.previousHashes,
     };
 
     const mainFrame = page.mainFrame();
@@ -679,6 +683,15 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     return true;
   };
 
+  const fnv1a = (str: string): string => {
+    let hash = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      hash ^= str.charCodeAt(i);
+      hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+    return (hash >>> 0).toString(16);
+  };
+
   const actionTags = new Set(['a', 'button', 'details', 'form', 'input', 'label', 'option', 'select', 'summary', 'textarea']);
   const semanticTags = new Set([
     'article',
@@ -848,6 +861,21 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     if (nodes.length >= maxElements && !isHighPriority) continue;
 
     const id = getSemanticId(el, entryContext);
+
+    // Concept §3.7.1 Incremental Extraction (FNV-1a Hash)
+    let attrsStr = '';
+    for (let i = 0; i < el.attributes.length; i++) {
+      attrsStr += `${el.attributes[i].name}=${el.attributes[i].value};`;
+    }
+    const textSample = (el.textContent || '').substring(0, 100);
+    const hashStr = `${tagName}|${el.childElementCount}|${textSample}|${attrsStr}`;
+    const _hash = fnv1a(hashStr);
+
+    if (config.previousHashes?.[id] === _hash) {
+      nodes.push({ id, tagName, type: 'cached', _hash } as any);
+      continue;
+    }
+
     const parent = el.parentElement?.closest(`[${semanticIdAttr}], [id]`);
     const parentId = parent instanceof HTMLElement ? getSemanticId(parent, entryContext) : entryContext.rootParentId;
     const attributes = extractAttributes(el, trackedAttributes);
@@ -862,6 +890,7 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
 
     nodes.push(localDropUndefined({
       id,
+      _hash,
       tagName,
       role: role ?? undefined,
       label,
