@@ -176,6 +176,7 @@ export class ActionDiscovery {
         action_id: 'snapshot',
         action: 'snapshot',
         label: 'Take semantic snapshot',
+        params: { schema: { max_elements: 'number?' } },
         risk: 'low',
       },
       {

@@ -29,6 +29,7 @@ export class ApiServer {
   private semanticLayer = new SemanticLayer({ pluginRegistry: this.pluginRegistry });
   private previousSnapshots: Map<string, SemanticSnapshot> = new Map();
   private wsGateway: WebSocketGateway | null = null;
+  private reaper: NodeJS.Timeout | null = null;
   private commandRouter = new CommandRouter(
     this.browserCore,
     this.stateManager,
@@ -117,6 +118,7 @@ export class ApiServer {
 
     this.app.post('/api/v2/sessions', async (_req, res) => {
       try {
+        await this.pruneExpiredSessions();
         const sessionId = randomUUID();
         await this.browserCore.createSession(sessionId);
         this.stateManager.registerSession(sessionId);
@@ -134,6 +136,7 @@ export class ApiServer {
     this.app.post('/api/v2/sessions/import', async (req, res) => {
       let sessionId: string | undefined;
       try {
+        await this.pruneExpiredSessions();
         const pack = readPack(req.body);
         sessionId = String(req.body?.session_id ?? randomUUID());
         if (this.stateManager.getSessionState(sessionId) || this.browserCore.hasSession(sessionId)) {
@@ -245,6 +248,9 @@ export class ApiServer {
         const result = await this.commandRouter.execute({
           action: 'snapshot',
           session_id: req.params.id,
+          action_params: {
+            max_elements: numberQuery(req.query.max_elements),
+          },
           trace_id: stringQuery(req.query.trace_id),
         });
         res.json(result);
@@ -432,9 +438,19 @@ export class ApiServer {
         resolve();
       });
     });
+    this.reaper = setInterval(() => {
+      this.pruneExpiredSessions().catch((error) => {
+        console.error('Session reaper failed:', error);
+      });
+    }, 60_000);
+    this.reaper.unref?.();
   }
 
   async stop() {
+    if (this.reaper) {
+      clearInterval(this.reaper);
+      this.reaper = null;
+    }
     this.wsGateway?.close();
     this.wsGateway = null;
     await this.browserCore.close();
@@ -498,6 +514,23 @@ export class ApiServer {
     const tab = activeTab(this.stateManager.getSessionState(sessionId));
     return tab ? this.previousSnapshots.get(snapKey(sessionId, tab.tab_id)) : undefined;
   }
+
+  private async pruneExpiredSessions(): Promise<void> {
+    const timeoutSeconds = ConfigurationManager.getInstance().getConfig().security.session_timeout_seconds;
+    if (timeoutSeconds <= 0) return;
+
+    const cutoff = Date.now() - timeoutSeconds * 1000;
+    const expired = this.stateManager
+      .listSessions()
+      .filter((session) => session.status === 'active' && Date.parse(session.updated_at) < cutoff);
+
+    for (const session of expired) {
+      await this.browserCore.closeSession(session.session_id).catch(() => undefined);
+      this.stateManager.updateSession(session.session_id, { status: 'expired' });
+      deleteSessionSnaps(this.previousSnapshots, session.session_id);
+      globalMetrics.increment('llm_browser_sessions_expired_total');
+    }
+  }
 }
 
 function jsonRpcCode(error: LlmBrowserError): number {
@@ -536,6 +569,12 @@ function paginate<T>(items: T[], query: Record<string, any>, basePath: string) {
 
 function stringQuery(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+function numberQuery(value: unknown): number | undefined {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function enrichSession(session: any, storageState: any, pageUrl: string): any {

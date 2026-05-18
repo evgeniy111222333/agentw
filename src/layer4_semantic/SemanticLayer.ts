@@ -11,10 +11,12 @@ import { createDefaultPluginRegistry, PluginRegistry } from '../plugins/PluginRe
 import { globalMetrics } from '../common/MetricsRegistry';
 import { globalSemCache, semKey } from '../cache/Sem';
 import { AuthTracker } from '../auth/Auth';
+import { maskSnapshot } from '../privacy/Mask';
 
 export interface SnapshotBuildOptions {
   previousSnapshot?: SemanticSnapshot;
   session: SessionInfo;
+  maxElements?: number;
   pageLoadTime?: number;
   actionTime?: number;
   totalTime?: number;
@@ -53,8 +55,35 @@ export class SemanticLayer {
 
   async createSnapshot(page: Page, options: SnapshotBuildOptions): Promise<SemanticSnapshot> {
     const extractionStart = performance.now();
+    await this.stabilizePage(page);
+    try {
+      return await this.createSnapshotOnce(page, options, extractionStart);
+    } catch (error) {
+      if (!isNavigationContextError(error)) throw error;
+      await this.stabilizePage(page, true);
+      return this.createSnapshotOnce(page, options, extractionStart);
+    }
+  }
+
+  private async createSnapshotOnce(
+    page: Page,
+    options: SnapshotBuildOptions,
+    extractionStart: number
+  ): Promise<SemanticSnapshot> {
     const config = ConfigurationManager.getInstance().getConfig().semantic;
-    const cache = config.cache_enabled ? await semKey(page) : undefined;
+    const requestedMaxElements = normalizeMaxElements(options.maxElements, config.max_elements_hard_limit);
+    const cacheSeed = config.cache_enabled ? await semKey(page) : undefined;
+    const cache = cacheSeed
+      ? {
+          ...cacheSeed,
+          key: [
+            cacheSeed.key,
+            requestedMaxElements ?? config.max_elements,
+            config.adaptive_max_elements ? 'adaptive' : 'fixed',
+            config.max_elements_hard_limit,
+          ].join(':'),
+        }
+      : undefined;
     if (cache) {
       const cached = globalSemCache.get(cache.key, config.cache_ttl_ms);
       if (cached) {
@@ -64,7 +93,7 @@ export class SemanticLayer {
       globalMetrics.increment('llm_browser_semantic_cache_misses_total');
     }
 
-    const traversal = await this.traverser.traverse(page);
+    const traversal = await this.traverser.traverse(page, { maxElements: requestedMaxElements });
 
     const allElements = traversal.nodes.map((node): SemanticElement => {
       const type = this.classifier.classify(node);
@@ -77,13 +106,12 @@ export class SemanticLayer {
       };
     });
 
-    const incomplete =
-      traversal.stats.semantic_nodes_count >= config.max_elements &&
-      traversal.stats.dom_nodes_count > traversal.stats.semantic_nodes_count;
-    let elements = incomplete ? allElements.slice(0, config.max_elements) : allElements;
+    const incomplete = traversal.stats.semantic_nodes_total > traversal.stats.semantic_nodes_count;
+    let elements = allElements;
     let availableActions = this.actionDiscovery.discover(elements);
     const timestamp = new Date().toISOString();
-    const title = await page.title();
+    const rawTitle = await page.title().catch(() => '');
+    const title = rawTitle || inferTitle(elements, page.url());
 
     const pluginResult = await this.pluginRegistry.applyPageLoad({
       page,
@@ -111,6 +139,7 @@ export class SemanticLayer {
     };
     snapshot.auth = await this.authTracker.inspect(page, snapshot);
     recordAuthMetrics(snapshot.auth.authenticated);
+    const privacy = maskSnapshot(snapshot);
 
     const extractionTime = Math.round(performance.now() - extractionStart);
     const meta: SnapshotMeta = {
@@ -120,6 +149,9 @@ export class SemanticLayer {
       extraction_time: extractionTime,
       dom_nodes_count: traversal.stats.dom_nodes_count,
       semantic_nodes_count: elements.length,
+      semantic_nodes_total: traversal.stats.semantic_nodes_total,
+      max_elements: traversal.stats.max_elements,
+      max_elements_requested: traversal.stats.max_elements_requested,
       raw_dom_bytes: traversal.stats.raw_dom_bytes,
       cache_status: cache ? 'miss' : 'disabled',
       cache_key: cache?.key,
@@ -130,6 +162,7 @@ export class SemanticLayer {
         ...pluginResult.stats,
         plugins: pluginResult.metadata,
       },
+      privacy,
     };
 
     snapshot.meta = dropUndefined(meta);
@@ -162,6 +195,8 @@ export class SemanticLayer {
     snapshot.session = options.session;
     snapshot.auth = await this.authTracker.inspect(page, snapshot);
     recordAuthMetrics(snapshot.auth.authenticated);
+    const privacy = maskSnapshot(snapshot);
+    const cachePrivacy = privacy.masked > 0 ? privacy : snapshot.meta?.privacy;
     const meta: SnapshotMeta = dropUndefined({
       ...(snapshot.meta ?? {}),
       page_load_time: options.pageLoadTime,
@@ -173,6 +208,7 @@ export class SemanticLayer {
       cache_key: cacheKey,
       cache_age_ms: cacheAgeMs,
       cache_entries: globalSemCache.stats().entries,
+      privacy: cachePrivacy,
     });
     snapshot.meta = meta;
     delete snapshot.delta;
@@ -181,6 +217,13 @@ export class SemanticLayer {
     meta.token_estimate = Math.ceil(snapshotBytes / 4);
     snapshot.delta = this.differ.diff(options.previousSnapshot, snapshot);
     return snapshot;
+  }
+
+  private async stabilizePage(page: Page, retry = false): Promise<void> {
+    const config = ConfigurationManager.getInstance().getConfig().semantic;
+    await page.waitForLoadState('domcontentloaded', { timeout: retry ? 3000 : 1000 }).catch(() => undefined);
+    await page.waitForLoadState('networkidle', { timeout: retry ? 3000 : 1000 }).catch(() => undefined);
+    await page.waitForTimeout(config.stabilization_ms);
   }
 }
 
@@ -217,13 +260,15 @@ function collectAlerts(elements: SemanticElement[]): any[] | undefined {
 function collectNavigation(elements: SemanticElement[], belowFoldCount: number): any {
   const links = elements.filter((element) => element.type === 'link');
   const headings = elements.filter((element) => element.type === 'heading');
+  const navigationHeadings = headings.length > 0 ? headings : inferHeadings(elements);
 
   return {
     links_count: links.length,
-    headings: headings.slice(0, 12).map((heading) => ({
+    headings: navigationHeadings.slice(0, 12).map((heading) => ({
       id: heading.id,
       level: heading.level,
       text: heading.text ?? heading.label,
+      inferred: heading.type !== 'heading' || undefined,
     })),
     viewport_hint:
       belowFoldCount > 0
@@ -233,6 +278,28 @@ function collectNavigation(elements: SemanticElement[], belowFoldCount: number):
           }
         : undefined,
   };
+}
+
+function inferHeadings(elements: SemanticElement[]): SemanticElement[] {
+  const blocked = new Set(['home', 'new', 'past', 'comments', 'ask', 'show', 'jobs', 'submit', 'login', 'sign in']);
+  return elements.filter((element) => {
+    if (!['link', 'text', 'article'].includes(element.type)) return false;
+    const text = String(element.text ?? element.label ?? '').trim();
+    if (text.length < 12 || text.length > 140) return false;
+    if (blocked.has(text.toLowerCase())) return false;
+    return /[A-Za-z\u0400-\u04FF]/.test(text);
+  });
+}
+
+function inferTitle(elements: SemanticElement[], url: string): string {
+  const heading = elements.find((element) => element.type === 'heading' && (element.text || element.label));
+  const text = heading?.text ?? heading?.label;
+  if (text) return String(text).slice(0, 120);
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
 }
 
 function dropUndefined<T extends Record<string, any>>(value: T): T {
@@ -250,4 +317,16 @@ function clone<T>(value: T): T {
 
 function recordAuthMetrics(authenticated: boolean): void {
   globalMetrics.increment(authenticated ? 'llm_browser_auth_authenticated_total' : 'llm_browser_auth_anonymous_total');
+}
+
+function normalizeMaxElements(value: number | undefined, hardLimit: number): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.min(Math.max(1, Math.round(parsed)), Math.max(1, hardLimit));
+}
+
+function isNavigationContextError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Execution context was destroyed|Cannot find context|Frame was detached|Target closed|navigation/i.test(message);
 }

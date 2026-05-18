@@ -128,17 +128,8 @@ export class ActionExecutor {
 
       case 'submit': {
         const locator = await this.resolveActionableLocator(page, targetId, action);
-        await locator.evaluate((element) => {
-          const form = element instanceof HTMLFormElement ? element : element.closest('form');
-          if (!form) throw new Error('Target is not inside a form');
-          if (typeof form.requestSubmit === 'function') {
-            form.requestSubmit();
-          } else {
-            form.submit();
-          }
-        });
-        await this.shortStabilization(page);
-        return;
+        await this.submitLocator(page, locator, params.timeout_ms ?? 5000);
+        return { url: page.url() };
       }
 
       case 'hover': {
@@ -981,8 +972,35 @@ export class ActionExecutor {
     return page.locator(`[data-llm-browser-id="${escaped}"], [id="${escaped}"]`).first();
   }
 
-  private async shortStabilization(page: Page): Promise<void> {
-    await page.waitForLoadState('networkidle', { timeout: 1000 }).catch(() => undefined);
+  private async submitLocator(page: Page, locator: Locator, timeoutMs: number): Promise<void> {
+    const navigation = page.waitForNavigation({ waitUntil: 'load', timeout: Math.min(timeoutMs, 2000) }).catch(() => undefined);
+    let contextDestroyed = false;
+
+    try {
+      await locator.evaluate((element) => {
+        const form = element instanceof HTMLFormElement ? element : element.closest('form');
+        if (!form) throw new Error('Target is not inside a form');
+        if (typeof form.requestSubmit === 'function') {
+          form.requestSubmit();
+        } else {
+          form.submit();
+        }
+      });
+    } catch (error) {
+      if (isContextDestroyed(error)) {
+        contextDestroyed = true;
+      } else {
+        throw error;
+      }
+    }
+
+    const nav = await navigation;
+    await this.shortStabilization(page, contextDestroyed || Boolean(nav) ? 2000 : 1000);
+  }
+
+  private async shortStabilization(page: Page, timeoutMs = 1000): Promise<void> {
+    await page.waitForLoadState('domcontentloaded', { timeout: Math.min(timeoutMs, 2000) }).catch(() => undefined);
+    await page.waitForLoadState('networkidle', { timeout: timeoutMs }).catch(() => undefined);
     await page.waitForTimeout(100);
   }
 
@@ -1022,6 +1040,11 @@ function stripRoutingParams(params: Record<string, any>): Record<string, any> {
   delete clone.element_id;
   delete clone.target_id;
   return clone;
+}
+
+function isContextDestroyed(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Execution context was destroyed|Cannot find context|Target closed|Frame was detached/i.test(message);
 }
 
 function toArray(value: unknown): string[] {

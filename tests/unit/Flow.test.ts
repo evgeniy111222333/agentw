@@ -1,5 +1,6 @@
 import { Browser, chromium, Page } from 'playwright';
 import { ActionExecutor } from '../../src/layer2_action_execution/ActionExecutor';
+import { createServer, Server } from 'http';
 
 jest.setTimeout(30000);
 
@@ -7,8 +8,19 @@ describe('Flow actions', () => {
   let browser: Browser | undefined;
   let page: Page | undefined;
   let executor: ActionExecutor;
+  let submitServer: Server | undefined;
+  let submitUrl = '';
 
   beforeAll(async () => {
+    submitServer = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<!doctype html><title>Submitted</title><h1>Submitted</h1>');
+    });
+    await new Promise<void>((resolve) => submitServer!.listen(0, '127.0.0.1', () => resolve()));
+    const address = submitServer.address();
+    if (!address || typeof address === 'string') throw new Error('submit server did not start');
+    submitUrl = `http://127.0.0.1:${address.port}/submitted`;
+
     browser = await chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-gpu'],
@@ -18,7 +30,7 @@ describe('Flow actions', () => {
   beforeEach(async () => {
     page = await browser!.newPage({ viewport: { width: 1280, height: 720 } });
     executor = new ActionExecutor({ getPage: () => page } as any);
-    await page.setContent(flowHtml());
+    await page.setContent(flowHtml(submitUrl));
   });
 
   afterEach(async () => {
@@ -29,6 +41,8 @@ describe('Flow actions', () => {
   afterAll(async () => {
     await browser?.close();
     browser = undefined;
+    await new Promise<void>((resolve, reject) => submitServer?.close((error) => (error ? reject(error) : resolve())) ?? resolve());
+    submitServer = undefined;
   });
 
   it('fills forms, runs sequences, waits for state, and loops bounded actions', async () => {
@@ -88,9 +102,24 @@ describe('Flow actions', () => {
     expect(result.data?.pages[0].text).toContain('alpha page 1');
     expect(result.data?.pages[1].text).toContain('alpha page 2');
   });
+
+  it('fills and submits forms that navigate without surfacing context destruction', async () => {
+    const result = await executor.executeAction('session', 'fill_form', 'nav-form', {
+      fields: {
+        nav_email: 'submit@example.com',
+      },
+      submit: true,
+    });
+
+    expect(result.data).toEqual(expect.objectContaining({
+      mode: 'fill_form',
+      submitted: true,
+    }));
+    await expect(page!.locator('h1').textContent()).resolves.toBe('Submitted');
+  });
 });
 
-function flowHtml(): string {
+function flowHtml(submitUrl: string): string {
   return `<!doctype html>
 <html>
   <head><title>Flow</title></head>
@@ -113,6 +142,10 @@ function flowHtml(): string {
     <button id="search-btn" onclick="document.getElementById('results').textContent = 'alpha page 1'">Search</button>
     <button id="next" onclick="document.getElementById('results').textContent = 'alpha page 2'; this.hidden = true;">Next</button>
     <p id="results">empty</p>
+    <form id="nav-form" method="get" action="${submitUrl}">
+      <label>Nav email <input id="nav-email" name="nav_email" type="email" required></label>
+      <button type="submit">Submit nav</button>
+    </form>
   </body>
 </html>`;
 }

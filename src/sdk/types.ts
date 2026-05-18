@@ -254,12 +254,13 @@ export interface BrowserClientContract {
   listTabs(sessionId: string): Promise<TabState[]>;
   listEvents(sessionId: string, options?: { tab_id?: string; kind?: RuntimeEventKind; limit?: number }): Promise<RuntimeEventInfo>;
   clearEvents(sessionId: string): Promise<void>;
+  getSnapshot(sessionId: string, options?: { max_elements?: number }): Promise<CommandResult>;
   getAudit(sessionId?: string): Promise<Pagination<any>>;
 }
 
 export interface BrowserSessionContract {
   id: string;
-  snapshot(): Promise<CommandResult>;
+  snapshot(options?: { max_elements?: number }): Promise<CommandResult>;
   export(): Promise<SessionPack>;
   diagnostics(): Promise<Record<string, any>>;
   auth(): Promise<AuthState>;

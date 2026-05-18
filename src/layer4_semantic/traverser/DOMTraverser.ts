@@ -46,16 +46,27 @@ export interface TraversalResult {
   stats: {
     dom_nodes_count: number;
     semantic_nodes_count: number;
+    semantic_nodes_total: number;
     skipped_invisible: number;
     skipped_noise: number;
     below_fold_count: number;
     raw_dom_bytes: number;
+    max_elements: number;
+    max_elements_requested?: number;
   };
 }
 
+export interface TraverseOptions {
+  maxElements?: number;
+}
+
 export class DOMTraverser {
-  async traverse(page: Page): Promise<TraversalResult> {
+  async traverse(page: Page, options: TraverseOptions = {}): Promise<TraversalResult> {
     const semanticConfig = ConfigurationManager.getInstance().getConfig().semantic;
+    const runtimeConfig = {
+      ...semanticConfig,
+      max_elements_override: options.maxElements,
+    };
 
     return page.evaluate((config) => {
       const semanticIdAttr = 'data-llm-browser-id';
@@ -321,10 +332,19 @@ export class DOMTraverser {
       const allElements = Array.from(document.body?.querySelectorAll('*') ?? []).filter(
         (el): el is HTMLElement => el instanceof HTMLElement
       );
+      const hardLimit = Math.max(1, Number(config.max_elements_hard_limit ?? config.max_elements));
+      const requestedMax =
+        config.max_elements_override === undefined ? undefined : Math.max(1, Number(config.max_elements_override));
+      const baseMax = Math.min(hardLimit, requestedMax ?? Math.max(1, Number(config.max_elements)));
+      const adaptiveMax = config.adaptive_max_elements && requestedMax === undefined
+        ? Math.max(baseMax, Math.ceil(Math.sqrt(allElements.length) * 10))
+        : baseMax;
+      const maxElements = Math.min(hardLimit, adaptiveMax);
       const nodes: TraversedNode[] = [];
       let skippedInvisible = 0;
       let skippedNoise = 0;
       let belowFoldCount = 0;
+      let semanticCandidates = 0;
 
       for (const el of allElements) {
         const tagName = el.tagName.toLowerCase();
@@ -352,6 +372,9 @@ export class DOMTraverser {
           skippedNoise += 1;
           continue;
         }
+
+        semanticCandidates += 1;
+        if (nodes.length >= maxElements) continue;
 
         const id = getSemanticId(el);
         const parent = el.parentElement?.closest(`[${semanticIdAttr}], [id]`);
@@ -392,8 +415,6 @@ export class DOMTraverser {
           table: extractTable(el),
           list: extractList(el),
         });
-
-        if (nodes.length >= config.max_elements) break;
       }
 
       const rawDomBytes = new TextEncoder().encode(document.documentElement?.outerHTML ?? '').length;
@@ -403,12 +424,15 @@ export class DOMTraverser {
         stats: {
           dom_nodes_count: allElements.length,
           semantic_nodes_count: nodes.length,
+          semantic_nodes_total: semanticCandidates,
           skipped_invisible: skippedInvisible,
           skipped_noise: skippedNoise,
           below_fold_count: belowFoldCount,
           raw_dom_bytes: rawDomBytes,
+          max_elements: maxElements,
+          max_elements_requested: requestedMax,
         },
       };
-    }, semanticConfig);
+    }, runtimeConfig);
   }
 }

@@ -71,6 +71,46 @@ describe('AuthTracker', () => {
       has_state: true,
     }));
   });
+
+  it('does not treat public login links or provider hostnames as authenticated sessions', async () => {
+    const tracker = new AuthTracker();
+    const auth = await tracker.inspect(
+      fakePage('https://github.com/', []),
+      snapshot('https://github.com/', [
+        { id: 'hero', type: 'text', text: 'Build and ship software on a single platform' },
+        { id: 'signin', type: 'link', text: 'Sign in', url: '/login' },
+        { id: 'email', type: 'text', text: 'support@github.com' },
+      ])
+    );
+
+    expect(auth.authenticated).toBe(false);
+    expect(auth.method).toBeUndefined();
+    expect(auth.oauth).toBeUndefined();
+    expect(auth.user_identity).toBeUndefined();
+    expect(auth.confidence).toBeLessThan(0.8);
+  });
+
+  it('does not mark weak anonymous token cookies as authenticated without account proof', async () => {
+    const tracker = new AuthTracker();
+    const auth = await tracker.inspect(
+      fakePage('https://www.wikipedia.org/', [
+        {
+          name: 'centralAuth_Token',
+          value: 'anonymous-token',
+          domain: '.wikipedia.org',
+          path: '/',
+        },
+      ]),
+      snapshot('https://www.wikipedia.org/', [
+        { id: 'login', type: 'link', text: 'Log in' },
+        { id: 'search', type: 'input', label: 'Search Wikipedia' },
+      ])
+    );
+
+    expect(auth.authenticated).toBe(false);
+    expect(auth.cookies).toEqual([]);
+    expect(auth.indicators).toContain('login_content');
+  });
 });
 
 function fakePage(url: string, cookies: any[]): any {

@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "measure:snapshot": "ts-node scripts/measure_snapshot.ts",
+    "py:test": "python -m unittest discover -s python/tests",
     "sdk:smoke": "ts-node scripts/sdk_smoke.ts",
     "smoke:api": "ts-node scripts/api_smoke.ts",
     "test": "jest",

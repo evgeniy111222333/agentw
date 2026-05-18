@@ -12,9 +12,10 @@ type CookieLike = {
 };
 
 const authCookiePattern = /(^|[_\-.])(session|sid|auth|token|jwt|access|refresh|id[_-]?token|sso|oauth)($|[_\-.])/i;
+const ignoredAuthCookiePattern = /(csrf|xsrf|nonce|visitor|guest|anon|anonymous|consent|pref|analytics|geo|wmf|wikimedia|last[-_]?access|central[-_]?auth[-_]?token)/i;
+const strongAuthCookiePattern = /(^|[_\-.])(session|sid|auth|sso)($|[_\-.])/i;
 const loginPathPattern = /\/(login|log-in|signin|sign-in|auth|oauth|sso)(\/|$)/i;
 const accountPathPattern = /\/(dashboard|account|profile|settings|admin|workspace|home)(\/|$)/i;
-const emailPattern = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 
 export class AuthTracker {
   async inspect(page: Page, snapshot: SemanticSnapshot): Promise<AuthState> {
@@ -23,67 +24,84 @@ export class AuthTracker {
     const oauth = detectOAuth(url);
     const text = collectText(snapshot.elements);
     const loginFormDetected = hasLoginForm(snapshot.elements, text, url);
+    const loginContentDetected = /\b(sign\s*in|log\s*in|login|create account|forgot password)\b/i.test(text);
     const userIdentity = detectIdentity(text);
+    const logoutDetected = /\b(log\s*out|sign\s*out|logout|signout)\b/i.test(text);
+    const accountContentDetected = /\b(my account|account settings|profile|dashboard)\b/i.test(text);
+    const accountUrlDetected = accountPathPattern.test(url);
+    const strongCookieDetected = cookies.some((cookie) => strongAuthCookiePattern.test(cookie.name));
 
     const indicators: string[] = [];
     let positive = 0;
     let negative = 0;
     let method: AuthState['method'];
+    let strongProof = false;
 
     if (cookies.length > 0) {
-      positive += 0.55;
+      positive += strongCookieDetected ? 0.55 : 0.25;
       method = pickCookieMethod(cookies);
       indicators.push('auth_cookie');
     }
-    if (accountPathPattern.test(url)) {
-      positive += 0.2;
+    if (accountUrlDetected) {
+      positive += 0.25;
+      strongProof = true;
       indicators.push('account_url');
     }
-    if (/\b(log\s*out|sign\s*out|logout|signout)\b/i.test(text)) {
-      positive += 0.25;
+    if (logoutDetected) {
+      positive += 0.4;
+      strongProof = true;
       indicators.push('logout_control');
     }
-    if (/\b(my account|account settings|profile|dashboard)\b/i.test(text)) {
-      positive += 0.15;
+    if (accountContentDetected) {
+      positive += 0.25;
+      strongProof = true;
       indicators.push('account_content');
     }
     if (userIdentity) {
-      positive += 0.1;
+      positive += 0.2;
+      strongProof = true;
       indicators.push('user_identity');
     }
 
     if (loginPathPattern.test(url)) {
-      negative += 0.3;
+      negative += 0.5;
       indicators.push('login_url');
     }
     if (loginFormDetected) {
-      negative += 0.35;
+      negative += 0.55;
       indicators.push('login_form');
       method = method ?? 'form';
     }
-    if (/\b(sign\s*in|log\s*in|login|create account|forgot password)\b/i.test(text)) {
-      negative += 0.15;
+    if (loginContentDetected) {
+      negative += 0.2;
       indicators.push('login_content');
     }
 
     if (oauth.detected) {
-      method = 'oauth';
       indicators.push(`oauth_${oauth.stage ?? 'unknown'}`);
+      if (oauth.stage !== 'unknown') method = 'oauth';
       if (oauth.stage === 'callback' && oauth.has_code) {
-        positive += 0.2;
-      } else if (cookies.length === 0) {
-        negative += 0.3;
+        positive += 0.15;
+      } else if (oauth.stage === 'authorize') {
+        negative += 0.35;
+      } else {
+        negative += 0.1;
       }
     }
 
-    const score = positive - negative;
-    const authenticated = cookies.length > 0 ? score >= 0.25 : score >= 0.3;
-    const confidence = clamp(authenticated ? 0.5 + positive - negative * 0.35 : 0.5 + negative - positive * 0.35);
+    const authenticated =
+      positive >= 0.55 &&
+      negative < 0.55 &&
+      (strongProof || (strongCookieDetected && !loginFormDetected && !loginContentDetected));
+    const confidence = authenticated
+      ? clamp(0.55 + positive * 0.35 - negative * 0.25)
+      : clamp(0.5 + Math.min(0.3, negative * 0.35) - Math.min(0.2, positive * 0.2));
+    const finalMethod = authenticated || (oauth.detected && oauth.stage !== 'unknown') ? method : loginFormDetected ? 'form' : undefined;
 
     return dropUndefined({
       authenticated,
       confidence: Number(confidence.toFixed(2)),
-      method: method ?? (authenticated ? 'unknown' : undefined),
+      method: finalMethod ?? (authenticated ? 'unknown' : undefined),
       session_expires_at: firstExpiry(cookies),
       user_identity: userIdentity,
       indicators: Array.from(new Set(indicators)),
@@ -113,7 +131,7 @@ function safeUrl(page: Page): string {
 
 function sanitizeAuthCookies(cookies: CookieLike[]): AuthCookieInfo[] {
   return cookies
-    .filter((cookie) => authCookiePattern.test(cookie.name))
+    .filter((cookie) => authCookiePattern.test(cookie.name) && !ignoredAuthCookiePattern.test(cookie.name))
     .map((cookie) =>
       dropUndefined({
         name: cookie.name,
@@ -138,9 +156,10 @@ function detectOAuth(url: string): OAuthState {
   const params = parsed.searchParams;
   const hasAuthorizeParams = params.has('client_id') || params.has('redirect_uri') || params.has('response_type');
   const hasCallbackParams = params.has('code') || params.has('access_token') || params.has('id_token');
-  const oauthHost = /(accounts\.google|github\.com|login\.microsoftonline|okta|auth0|oauth|sso)/i.test(parsed.hostname);
+  const authProviderHost = /(accounts\.google|login\.microsoftonline|okta|auth0|oauth|sso)/i.test(parsed.hostname);
+  const githubOAuth = /(^|\.)github\.com$/i.test(parsed.hostname) && /\/login\/oauth|\/oauth|\/authorize/i.test(parsed.pathname);
   const oauthPath = /(oauth|authorize|callback|sso)/i.test(parsed.pathname);
-  const detected = hasAuthorizeParams || hasCallbackParams || oauthHost || oauthPath;
+  const detected = hasAuthorizeParams || hasCallbackParams || githubOAuth || oauthPath || (authProviderHost && !/^github\.com$/i.test(parsed.hostname));
 
   return dropUndefined({
     detected,
@@ -176,10 +195,8 @@ function hasLoginForm(elements: SemanticElement[], text: string, url: string): b
 }
 
 function detectIdentity(text: string): string | undefined {
-  const signedIn = /\b(?:signed in as|logged in as|welcome,?)\s+([^\s<>,;]{2,80})/i.exec(text);
-  if (signedIn?.[1]) return sanitizeIdentity(signedIn[1]);
-  const email = emailPattern.exec(text);
-  return email?.[0] ? sanitizeIdentity(email[0]) : undefined;
+  const signedIn = /\b(?:signed in as|logged in as|authenticated as|welcome,?)\s+([^\s<>,;]{2,80})/i.exec(text);
+  return signedIn?.[1] ? sanitizeIdentity(signedIn[1]) : undefined;
 }
 
 function sanitizeIdentity(value: string): string | undefined {

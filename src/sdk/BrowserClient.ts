@@ -136,8 +136,11 @@ export class BrowserClient {
     });
   }
 
-  async getSnapshot(sessionId: string): Promise<CommandResult> {
-    return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/snapshot`);
+  async getSnapshot(sessionId: string, options: { max_elements?: number } = {}): Promise<CommandResult> {
+    const params = new URLSearchParams();
+    if (options.max_elements !== undefined) params.set('max_elements', String(options.max_elements));
+    const suffix = params.size > 0 ? `?${params}` : '';
+    return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/snapshot${suffix}`);
   }
 
   async executeAction(
@@ -272,8 +275,8 @@ export class BrowserClient {
 export class BrowserSession {
   constructor(private client: BrowserClient, readonly id: string) {}
 
-  snapshot(): Promise<CommandResult> {
-    return this.client.getSnapshot(this.id);
+  snapshot(options: { max_elements?: number } = {}): Promise<CommandResult> {
+    return this.client.getSnapshot(this.id, options);
   }
 
   export(): Promise<SessionPack> {

@@ -33,9 +33,9 @@ export class SnapshotDiffer {
       }
     }
 
-    for (const [id] of previousElements) {
+    for (const [id, element] of previousElements) {
       if (!nextElements.has(id)) {
-        operations.push({ op: 'element_remove', element_id: id });
+        operations.push({ op: 'element_remove', element_id: id, before: compactElement(element) });
         removed += 1;
       }
     }

@@ -3,14 +3,19 @@ export interface BrowserConfig {
   viewport: { width: number; height: number };
   user_agent: string;
   ignore_https_errors: boolean;
+  max_tabs_per_session: number;
+  memory_limit_mb: number;
 }
 
 export interface SemanticConfig {
   max_elements: number;
+  max_elements_hard_limit: number;
+  adaptive_max_elements: boolean;
   max_text_length: number;
   visible_only: boolean;
   group_similar: boolean;
   extraction_timeout_ms: number;
+  stabilization_ms: number;
   cache_enabled: boolean;
   cache_ttl_ms: number;
   cache_max_entries: number;
@@ -80,19 +85,24 @@ export class ConfigurationManager {
         port: envNumber('LLM_BROWSER_PORT', 3001),
         workers: envNumber('LLM_BROWSER_WORKERS', 4),
         timeout_ms: envNumber('LLM_BROWSER_TIMEOUT_MS', 30000),
-        max_sessions: envNumber('LLM_BROWSER_MAX_SESSIONS', 1000),
+        max_sessions: envNumber('LLM_BROWSER_MAX_SESSIONS', 8),
       },
       browser: {
         viewport: { width: 1280, height: 720 },
         user_agent: 'LLM-Browser/1.0',
         ignore_https_errors: false,
+        max_tabs_per_session: envNumber('LLM_BROWSER_MAX_TABS_PER_SESSION', 5),
+        memory_limit_mb: envNumber('LLM_BROWSER_MEMORY_LIMIT_MB', 2048),
       },
       semantic: {
-        max_elements: 200,
+        max_elements: envNumber('LLM_BROWSER_MAX_ELEMENTS', 300),
+        max_elements_hard_limit: envNumber('LLM_BROWSER_MAX_ELEMENTS_HARD_LIMIT', 1000),
+        adaptive_max_elements: envBoolean('LLM_BROWSER_ADAPTIVE_MAX_ELEMENTS', true),
         max_text_length: 10000,
         visible_only: true,
         group_similar: true,
         extraction_timeout_ms: 2000,
+        stabilization_ms: envNumber('LLM_BROWSER_SEMANTIC_STABILIZATION_MS', 150),
         cache_enabled: envBoolean('LLM_BROWSER_SEMANTIC_CACHE_ENABLED', true),
         cache_ttl_ms: envNumber('LLM_BROWSER_SEMANTIC_CACHE_TTL_MS', 30000),
         cache_max_entries: envNumber('LLM_BROWSER_SEMANTIC_CACHE_MAX_ENTRIES', 250),

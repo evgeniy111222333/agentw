@@ -2,6 +2,7 @@ import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { RuntimeEvent, RuntimeEventKind, RuntimeEventStats, TabState } from '../common/types';
 import { Events } from '../obs/Events';
+import { LlmBrowserError } from '../common/errors';
 
 export interface CreateSessionOptions {
   storageState?: any;
@@ -21,12 +22,13 @@ export class BrowserCore {
     this.browser = await chromium.launch({
       headless: true,
       executablePath: config.chromium_path,
-      args: ['--no-sandbox', '--disable-gpu'],
+      args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
     });
   }
 
   async createSession(sessionId: string, options: CreateSessionOptions = {}): Promise<void> {
     if (!this.browser) throw new Error('Browser not initialized');
+    this.assertCapacity('session');
     
     const config = ConfigurationManager.getInstance().getConfig().browser;
     const context = await this.browser.newContext({
@@ -91,11 +93,18 @@ export class BrowserCore {
   }
 
   stats(): Record<string, number | boolean> {
+    const config = ConfigurationManager.getInstance().getConfig();
+    const memory = memoryStats();
     return {
       initialized: Boolean(this.browser),
       contexts: this.contexts.size,
       pages: Array.from(this.pages.values()).reduce((total, tabs) => total + tabs.size, 0),
+      max_sessions: config.server.max_sessions,
+      max_tabs_per_session: config.browser.max_tabs_per_session,
       events: this.events.stats().total,
+      rss_mb: memory.rss_mb,
+      heap_used_mb: memory.heap_used_mb,
+      memory_limit_mb: config.browser.memory_limit_mb,
     };
   }
 
@@ -139,6 +148,7 @@ export class BrowserCore {
 
   async openTab(sessionId: string, url?: string): Promise<TabState> {
     const context = this.getContext(sessionId);
+    this.assertCapacity('tab', sessionId);
     const page = await context.newPage();
     const tabId = this.registerPage(sessionId, page);
     this.activeTabs.set(sessionId, tabId);
@@ -228,4 +238,42 @@ export class BrowserCore {
       active: tabId === this.getActiveTabId(sessionId),
     };
   }
+
+  private assertCapacity(kind: 'session' | 'tab', sessionId?: string): void {
+    const config = ConfigurationManager.getInstance().getConfig();
+    const memory = memoryStats();
+    if (config.browser.memory_limit_mb > 0 && memory.rss_mb > config.browser.memory_limit_mb) {
+      throw new LlmBrowserError('RATE_LIMIT_EXCEEDED', 'Runtime memory budget exceeded', {
+        rss_mb: memory.rss_mb,
+        memory_limit_mb: config.browser.memory_limit_mb,
+      });
+    }
+
+    if (kind === 'session' && this.contexts.size >= config.server.max_sessions) {
+      throw new LlmBrowserError('RATE_LIMIT_EXCEEDED', 'max_sessions limit reached', {
+        max_sessions: config.server.max_sessions,
+        active_sessions: this.contexts.size,
+      });
+    }
+
+    if (kind === 'tab' && sessionId) {
+      const tabs = this.pages.get(sessionId);
+      const maxTabs = config.browser.max_tabs_per_session;
+      if (tabs && tabs.size >= maxTabs) {
+        throw new LlmBrowserError('RATE_LIMIT_EXCEEDED', 'max_tabs_per_session limit reached', {
+          max_tabs_per_session: maxTabs,
+          active_tabs: tabs.size,
+          session_id: sessionId,
+        });
+      }
+    }
+  }
+}
+
+function memoryStats(): { rss_mb: number; heap_used_mb: number } {
+  const memory = process.memoryUsage();
+  return {
+    rss_mb: Math.round(memory.rss / 1024 / 1024),
+    heap_used_mb: Math.round(memory.heapUsed / 1024 / 1024),
+  };
 }

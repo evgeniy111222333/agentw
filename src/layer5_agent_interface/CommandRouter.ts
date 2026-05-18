@@ -362,6 +362,7 @@ export class CommandRouter {
         () => this.semanticLayer.createSnapshot(page, {
           previousSnapshot,
           session: this.createSessionInfo(command.session_id),
+          maxElements: snapshotMaxElements(activeAction.params),
           actionTime: execution?.duration_ms ?? 0,
           totalTime: Math.round(performance.now() - requestStart),
           traceId,
@@ -777,4 +778,11 @@ function validateFsParams(params: Record<string, any>): void {
   ) {
     throw new LlmBrowserError('MISSING_PARAM', 'content or base64 is required for fs write');
   }
+}
+
+function snapshotMaxElements(params: Record<string, any>): number | undefined {
+  const value = params.max_elements ?? params.maxElements ?? params.snapshot?.max_elements ?? params.snapshot?.maxElements;
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }

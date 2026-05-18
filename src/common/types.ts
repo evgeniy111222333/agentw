@@ -68,6 +68,9 @@ export interface SnapshotMeta {
   extraction_time?: number;
   dom_nodes_count?: number;
   semantic_nodes_count?: number;
+  semantic_nodes_total?: number;
+  max_elements?: number;
+  max_elements_requested?: number;
   raw_dom_bytes?: number;
   snapshot_bytes?: number;
   token_estimate?: number;
@@ -84,6 +87,12 @@ export interface SnapshotMeta {
     warnings: number;
     plugins: Record<string, any>;
   };
+  privacy?: PrivacyStats;
+}
+
+export interface PrivacyStats {
+  masked: number;
+  kinds: Record<string, number>;
 }
 
 export interface SemanticDeltaOperation {

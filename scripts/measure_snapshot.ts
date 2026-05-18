@@ -42,6 +42,9 @@ async function main() {
         snapshot_bytes: first.meta?.snapshot_bytes,
         token_estimate: first.meta?.token_estimate,
         compression_ratio: first.meta?.compression_ratio,
+        max_elements: first.meta?.max_elements,
+        semantic_nodes_total: first.meta?.semantic_nodes_total,
+        privacy: first.meta?.privacy,
         plugin_contributions: first.meta?.plugin_contributions,
         sam_actions: first.available_actions.filter((action) => action.source?.standard === 'SAM').length,
         flow_actions: first.available_actions.filter((action) =>
@@ -63,6 +66,7 @@ async function main() {
         cache_status: repeat.meta?.cache_status,
         cache_age_ms: repeat.meta?.cache_age_ms,
         delta_operations: repeat.delta?.operations.length ?? 0,
+        privacy: repeat.meta?.privacy,
       },
       second_snapshot: {
         elements: second.elements.length,
@@ -71,6 +75,7 @@ async function main() {
         delta_operations: second.delta?.operations.length ?? 0,
         delta_stats: second.delta?.stats,
         cache_status: second.meta?.cache_status,
+        privacy: second.meta?.privacy,
         plugin_contributions: second.meta?.plugin_contributions,
       },
       tabs: await measureTabs(),

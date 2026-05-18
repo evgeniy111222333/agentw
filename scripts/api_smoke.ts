@@ -391,6 +391,7 @@ async function main() {
         misses: cache.stats.misses,
         probe_one: cacheProbeOne.snapshot.meta?.cache_status,
         probe_two: cacheProbeTwo.snapshot.meta?.cache_status,
+        max_elements: cacheProbeOne.snapshot.meta?.max_elements,
       },
       events: {
         total: events.stats.total,
@@ -401,6 +402,11 @@ async function main() {
         recent_console: consoleEvents.events.slice(-3).map((event: any) => ({ level: event.level, text: event.text })),
       },
       rest_snapshot_elements: snapshot.snapshot.elements.length,
+      rest_snapshot_meta: {
+        max_elements: snapshot.snapshot.meta?.max_elements,
+        semantic_nodes_total: snapshot.snapshot.meta?.semantic_nodes_total,
+        privacy: snapshot.snapshot.meta?.privacy,
+      },
       recorded_actions: actions.pagination.total_count,
       audit_events: audit.pagination.total_count,
       operations: ops.pagination.total_count,

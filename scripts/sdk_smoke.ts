@@ -169,6 +169,7 @@ async function main() {
             misses: semanticCache.stats.misses,
             probe_one: cacheProbeOne.snapshot.meta?.cache_status,
             probe_two: cacheProbeTwo.snapshot.meta?.cache_status,
+            max_elements: cacheProbeOne.snapshot.meta?.max_elements,
             invalidated: invalidated.data?.invalidated,
           },
           events: {
@@ -180,6 +181,11 @@ async function main() {
             recent_console: consoleEvents.events.slice(-3).map((event) => ({ level: event.level, text: event.text })),
           },
           ws_snapshot_elements: wsSnapshot.snapshot.elements.length,
+          snapshot_meta: {
+            max_elements: navigate.snapshot.meta?.max_elements,
+            semantic_nodes_total: navigate.snapshot.meta?.semantic_nodes_total,
+            privacy: navigate.snapshot.meta?.privacy,
+          },
           actions_recorded: actions.pagination.total_count,
           audit_events: audit.pagination.total_count,
           operations: ops.pagination.total_count,
