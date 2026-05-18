@@ -509,12 +509,34 @@ export class CommandRouter {
         },
       });
 
+      // Concept §2.5.2: Delta-mode by default for sequential actions on same page.
+      // When a delta is available, strip the full elements array to save tokens.
+      // The LLM client applies delta operations to reconstruct the current state.
+      let responseSnapshot = snapshot;
+      if (snapshot.delta && previousSnapshot) {
+        const { elements, ...deltaSnapshot } = snapshot;
+        responseSnapshot = {
+          ...deltaSnapshot,
+          elements: [], // Omitted — use delta.operations to reconstruct
+        } as SemanticSnapshot;
+      }
+      // Strip internal _hash field from elements before returning to agent
+      if (responseSnapshot.elements.length > 0) {
+        responseSnapshot = {
+          ...responseSnapshot,
+          elements: responseSnapshot.elements.map(el => {
+            const { _hash, ...rest } = el as any;
+            return rest;
+          }),
+        };
+      }
+
       return {
         status: 'success',
         action,
         action_id: actionId,
         data: execution?.data,
-        snapshot,
+        snapshot: responseSnapshot,
         timing: {
           total_ms: totalTime,
           action_ms: execution?.duration_ms ?? 0,

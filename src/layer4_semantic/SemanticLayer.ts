@@ -6,6 +6,7 @@ import { SnapshotDiffer, generateChecksum } from './diff/SnapshotDiffer';
 import { ContentExtractor } from './extractor/ContentExtractor';
 import { DOMTraverser } from './traverser/DOMTraverser';
 import { IncrementalUpdater } from './diff/IncrementalUpdater';
+import { StateReconciler } from '../layer3_state_management/StateReconciler';
 import { SmartWait } from './stabilization/SmartWait';
 import { TokenBudgetManager } from './budget/TokenBudgetManager';
 import { ConfigurationManager } from '../config/ConfigurationManager';
@@ -48,6 +49,7 @@ export class SemanticLayer {
   private pluginRegistry: PluginRegistry;
   private authTracker: AuthTracker;
   private incrementalUpdater: IncrementalUpdater;
+  private reconciler: StateReconciler;
   private smartWait: SmartWait;
   private tokenBudgetManager: TokenBudgetManager;
 
@@ -61,6 +63,7 @@ export class SemanticLayer {
     this.pluginRegistry = dependencies.pluginRegistry ?? createDefaultPluginRegistry(config.plugin_registry);
     this.authTracker = dependencies.authTracker ?? new AuthTracker();
     this.incrementalUpdater = new IncrementalUpdater(this.traverser, this.classifier, this.extractor);
+    this.reconciler = new StateReconciler();
     this.smartWait = new SmartWait();
     this.tokenBudgetManager = new TokenBudgetManager();
   }
@@ -68,12 +71,44 @@ export class SemanticLayer {
   async createSnapshot(page: Page, options: SnapshotBuildOptions): Promise<SemanticSnapshot> {
     const extractionStart = performance.now();
 
-    // Use IncrementalUpdater's in-memory snapshot as the previousSnapshot base
-    // so FNV-1a hashing can skip unchanged subtrees during traversal.
-    if (!options.forceRefresh && !options.previousSnapshot) {
+    // Concept §3.7.1: True incremental fast-path.
+    // If IncrementalUpdater has a snapshot patched via EventBus (form_state_updated,
+    // dom_mutated) AND StateReconciler confirms the page hasn't drifted, we can
+    // skip stabilization + DOM traversal entirely — 0ms extraction.
+    if (!options.forceRefresh) {
       const incremental = this.incrementalUpdater.getSnapshot(options.session.session_id);
       if (incremental) {
-        options = { ...options, previousSnapshot: incremental };
+        if (!options.previousSnapshot) {
+          // Try fast-path: validate with StateReconciler, skip DOM if valid.
+          try {
+            const reconcileResult = await this.reconciler.reconcile(
+              page, options.session.session_id, incremental
+            );
+            if (reconcileResult.valid) {
+              // State is still valid — return the in-memory snapshot directly.
+              const fastSnap: SemanticSnapshot = {
+                ...incremental,
+                snapshot_id: randomUUID(),
+                timestamp: new Date().toISOString(),
+                session: options.session,
+                meta: {
+                  ...incremental.meta,
+                  extraction_time: Math.round(performance.now() - extractionStart),
+                  cache_status: 'incremental' as any,
+                  incremental_extraction: true,
+                  incremental_cached_nodes: incremental.elements.length,
+                },
+              };
+              fastSnap.checksum = generateChecksum(fastSnap.elements);
+              this.incrementalUpdater.registerSession(options.session.session_id, page, fastSnap);
+              return fastSnap;
+            }
+          } catch {
+            // Reconciliation failed (page navigated, etc.) — fall through
+          }
+        }
+        // Use incremental as previousSnapshot for FNV-1a optimization
+        options = { ...options, previousSnapshot: options.previousSnapshot ?? incremental };
       }
     }
 
