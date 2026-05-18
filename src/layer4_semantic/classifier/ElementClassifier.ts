@@ -6,6 +6,9 @@ export class ElementClassifier {
     const tagName = normalize(node.tagName);
     const attributes = node.attributes ?? {};
 
+    if (node.shadow?.has_shadow) return 'shadow_host';
+    if (node.iframe?.embed_type || node.iframe?.iframe_type === 'content') return 'embed';
+
     const roleType = this.classifyByRole(role);
     if (roleType) return roleType;
 

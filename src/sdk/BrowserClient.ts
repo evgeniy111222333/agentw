@@ -4,6 +4,7 @@ import {
   BrowserAction,
   BrowserClientOptions,
   CommandResult,
+  CreateSessionOptions,
   CreateSessionResponse,
   ExecuteActionOptions,
   ImportSessionOptions,
@@ -15,9 +16,11 @@ import {
   RuntimeEventInfo,
   SessionPack,
   SemanticCacheInfo,
+  StreamEvent,
+  StreamSubscribeOptions,
   TraceRecord,
 } from './types';
-import { ActionRecord, AuthState, RuntimeEventKind, SessionState, TabState } from '../common/types';
+import { ActionRecord, AuthState, RuntimeEventKind, SessionState, TabState, ViewportState } from '../common/types';
 
 type JsonValue = Record<string, any>;
 
@@ -36,9 +39,10 @@ export class BrowserClient {
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? 100;
   }
 
-  async createSession(): Promise<BrowserSession> {
+  async createSession(options: CreateSessionOptions = {}): Promise<BrowserSession> {
     const response = await this.request<CreateSessionResponse>('/api/v2/sessions', {
       method: 'POST',
+      body: Object.keys(options).length > 0 ? options : undefined,
     });
     return new BrowserSession(this, response.session_id);
   }
@@ -323,8 +327,18 @@ export class BrowserSession {
     return this.client.executeAction(this.id, 'close_tab', { params: tabId ? { tab_id: tabId } : {} });
   }
 
+  setViewport(viewport: ViewportState | string): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'set_viewport', {
+      params: typeof viewport === 'string' ? { profile: viewport } : viewport,
+    });
+  }
+
   click(targetId: string): Promise<CommandResult> {
     return this.client.executeAction(this.id, 'click', { target_id: targetId });
+  }
+
+  interact(targetId: string): Promise<CommandResult> {
+    return this.client.executeAction(this.id, 'interact', { target_id: targetId });
   }
 
   type(targetId: string, text: string, options: Record<string, any> = {}): Promise<CommandResult> {
@@ -450,6 +464,7 @@ export class BrowserSocket {
   private socket?: WebSocket;
   private pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private openPromise?: Promise<void>;
+  private listeners = new Set<(event: StreamEvent) => void>();
 
   constructor(private url: string, private timeoutMs: number) {}
 
@@ -484,24 +499,75 @@ export class BrowserSocket {
     });
   }
 
+  async subscribe(options: StreamSubscribeOptions = {}, listener?: (event: StreamEvent) => void): Promise<Record<string, any>> {
+    if (listener) this.listeners.add(listener);
+    return this.control('subscribe', {
+      events: options.events ?? ['*'],
+      replay: options.replay,
+      since: options.since,
+      limit: options.limit,
+    });
+  }
+
+  async unsubscribe(events?: StreamSubscribeOptions['events']): Promise<Record<string, any>> {
+    return this.control('unsubscribe', { events: events ?? [] });
+  }
+
+  async replay(options: StreamSubscribeOptions = {}): Promise<Record<string, any>> {
+    return this.control('replay', {
+      events: options.events,
+      since: options.since,
+      limit: options.limit,
+    });
+  }
+
+  async ping(): Promise<Record<string, any>> {
+    return this.control('ping', {});
+  }
+
+  onEvent(listener: (event: StreamEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   close(): void {
     this.socket?.close();
+  }
+
+  private async control(type: string, payload: Record<string, any>): Promise<Record<string, any>> {
+    await this.connect();
+    const id = `${type}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new LlmBrowserApiError(`WebSocket ${type} timed out`, 'TIMEOUT_ACTION', 408, true));
+      }, this.timeoutMs);
+
+      this.pending.set(id, { resolve, reject, timer });
+      this.socket?.send(JSON.stringify({ type, ...payload, id }));
+    });
   }
 
   private handleMessage(raw: string): void {
     const message = JSON.parse(raw);
     if (message.type === 'connected') return;
 
-    const pending = this.pending.get(message.id);
-    if (!pending) return;
+    const pending = message.id ? this.pending.get(message.id) : undefined;
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(message.id);
 
-    clearTimeout(pending.timer);
-    this.pending.delete(message.id);
+      if (message.error) {
+        pending.reject(message.jsonrpc === '2.0' ? apiErrorFromJsonRpc(message.error) : streamError(message.error));
+      } else {
+        pending.resolve(message.result ?? message);
+      }
+      return;
+    }
 
-    if (message.error) {
-      pending.reject(apiErrorFromJsonRpc(message.error));
-    } else {
-      pending.resolve(message.result);
+    if (message.event_id && message.type) {
+      for (const listener of this.listeners) listener(message as StreamEvent);
     }
   }
 
@@ -533,6 +599,16 @@ function apiErrorFromJsonRpc(error: any): LlmBrowserApiError {
     undefined,
     Boolean(error.data?.recoverable),
     error.data ?? {}
+  );
+}
+
+function streamError(error: any): LlmBrowserApiError {
+  return new LlmBrowserApiError(
+    error?.message ?? 'WebSocket stream error',
+    error?.code ?? 'WS_STREAM_ERROR',
+    undefined,
+    Boolean(error?.recoverable),
+    error ?? {}
   );
 }
 

@@ -84,6 +84,16 @@ export class ActionDiscovery {
             fields: el.fields,
           })
         );
+      } else if (el.type === 'embed' || el.type === 'iframe') {
+        if (['content', 'payment', 'captcha', 'auth'].includes(String(el.iframe_type))) {
+          actions.push(
+            this.targeted('interact', el, el.label || el.embed_type || el.iframe_type || 'Interact with embedded content', {
+              schema: {
+                timeout_ms: 'number?',
+              },
+            })
+          );
+        }
       }
 
       if (el.in_viewport === false) {
@@ -180,6 +190,19 @@ export class ActionDiscovery {
         risk: 'low',
       },
       {
+        action_id: 'set_viewport',
+        action: 'set_viewport',
+        label: 'Set viewport',
+        params: {
+          schema: {
+            profile: 'desktop|tablet|mobile?',
+            width: 'number?',
+            height: 'number?',
+          },
+        },
+        risk: 'low',
+      },
+      {
         action_id: 'screenshot',
         action: 'screenshot',
         label: 'Take screenshot',
@@ -233,7 +256,7 @@ export class ActionDiscovery {
       label,
       params,
       preconditions: ['element_visible', 'element_enabled'],
-      risk: action === 'navigate' || action === 'submit' ? 'medium' : 'low',
+      risk: action === 'navigate' || action === 'submit' || action === 'interact' ? 'medium' : 'low',
     };
   }
 }

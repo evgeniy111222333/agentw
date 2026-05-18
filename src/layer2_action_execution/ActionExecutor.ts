@@ -92,11 +92,24 @@ export class ActionExecutor {
       case 'list_tabs':
         return { tabs: await this.browserCore.listTabs(sessionId) };
 
+      case 'set_viewport': {
+        const viewport = await this.browserCore.setViewport(sessionId, params.viewport ?? params);
+        await this.shortStabilization(page);
+        return { viewport, tabs: await this.browserCore.listTabs(sessionId) };
+      }
+
       case 'click': {
         const locator = await this.resolveActionableLocator(page, targetId, action);
         await locator.click({ timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
         return;
+      }
+
+      case 'interact': {
+        const locator = await this.resolveActionableLocator(page, targetId, action);
+        await locator.click({ timeout: params.timeout_ms ?? 5000 });
+        await this.shortStabilization(page);
+        return { interacted: true };
       }
 
       case 'type': {
@@ -144,7 +157,7 @@ export class ActionExecutor {
         const amount = Number(params.amount ?? 720);
         const direction = params.direction === 'up' ? -1 : 1;
         if (targetId) {
-          const locator = this.locatorFor(page, targetId);
+          const locator = await this.locatorForAny(page, targetId);
           await locator.scrollIntoViewIfNeeded({ timeout: params.timeout_ms ?? 5000 });
         } else {
           await page.mouse.wheel(0, amount * direction);
@@ -481,7 +494,7 @@ export class ActionExecutor {
 
       const nextId = params.next_id ?? params.next_button_id;
       if (nextId) {
-        const next = this.locatorFor(page, nextId);
+        const next = await this.locatorForAny(page, nextId);
         if ((await next.count()) === 0 || !(await next.isVisible().catch(() => false))) break;
         if (await next.isDisabled().catch(() => false)) break;
         await this.dispatch(sessionId, page, 'click', nextId, params, depth + 1);
@@ -504,7 +517,7 @@ export class ActionExecutor {
 
   private async upload(sessionId: string, page: Page, targetId: string | undefined, params: any): Promise<Record<string, any>> {
     if (!targetId) throw new Error('Target ID is required for upload action');
-    const locator = this.locatorFor(page, targetId);
+    const locator = await this.locatorForAny(page, targetId);
     await locator.waitFor({ state: 'attached', timeout: params.timeout_ms ?? 5000 });
     if (await locator.isDisabled().catch(() => false)) throw new Error(`Target ${targetId} is disabled`);
 
@@ -712,15 +725,15 @@ export class ActionExecutor {
 
     switch (condition.type) {
       case 'element_exists':
-        return (await this.locatorFor(page, condition.element_id ?? condition.target_id).count()) > 0;
+        return (await (await this.locatorForAny(page, condition.element_id ?? condition.target_id)).count()) > 0;
       case 'element_visible':
-        return this.locatorFor(page, condition.element_id ?? condition.target_id).isVisible().catch(() => false);
+        return (await this.locatorForAny(page, condition.element_id ?? condition.target_id)).isVisible().catch(() => false);
       case 'element_text_contains': {
-        const text = await this.locatorFor(page, condition.element_id ?? condition.target_id).textContent().catch(() => '');
+        const text = await (await this.locatorForAny(page, condition.element_id ?? condition.target_id)).textContent().catch(() => '');
         return (text ?? '').includes(String(condition.text ?? condition.value ?? ''));
       }
       case 'element_text_matches': {
-        const text = await this.locatorFor(page, condition.element_id ?? condition.target_id).textContent().catch(() => '');
+        const text = await (await this.locatorForAny(page, condition.element_id ?? condition.target_id)).textContent().catch(() => '');
         return new RegExp(String(condition.pattern ?? '')).test(text ?? '');
       }
       case 'element_state':
@@ -737,29 +750,30 @@ export class ActionExecutor {
   }
 
   private async findFormField(page: Page, formId: string, key: string): Promise<FieldRef> {
-    const field = await page.evaluate(({ formId, key }) => {
+    const formLocator = await this.locatorForAny(page, formId);
+    const prefix = formId.includes(':') ? `${formId.slice(0, formId.lastIndexOf(':'))}:` : '';
+    const field = await formLocator.evaluate((formElement, { formId, key, prefix }) => {
       const semanticIdAttr = 'data-llm-browser-id';
       const state = window as unknown as { __llmBrowserNextId?: number };
       state.__llmBrowserNextId ??= 1;
       const escapeAttribute = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       const norm = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-      const find = (id: string): HTMLElement | null =>
-        document.getElementById(id) ?? document.querySelector(`[${semanticIdAttr}="${escapeAttribute(id)}"]`);
       const ensureId = (el: HTMLElement): string => {
-        if (el.id) return el.id;
         const existing = el.getAttribute(semanticIdAttr);
-        if (existing) return existing;
-        const next = `e${state.__llmBrowserNextId}`;
-        state.__llmBrowserNextId = (state.__llmBrowserNextId ?? 1) + 1;
-        el.setAttribute(semanticIdAttr, next);
-        return next;
+        if (existing && (!prefix || existing.startsWith(prefix))) return existing;
+        if (!prefix && el.id) return el.id;
+        const base = el.id || existing || `e${state.__llmBrowserNextId}`;
+        if (!el.id && !existing) state.__llmBrowserNextId = (state.__llmBrowserNextId ?? 1) + 1;
+        const id = `${prefix}${base}`;
+        el.setAttribute(semanticIdAttr, id);
+        return id;
       };
       const labelText = (el: HTMLElement): string => {
         const explicit = el.id ? document.querySelector(`label[for="${escapeAttribute(el.id)}"]`) : null;
         const implicit = el.closest('label');
         return norm((explicit ?? implicit)?.textContent);
       };
-      const form = find(formId);
+      const form = formElement;
       if (!(form instanceof HTMLFormElement)) throw new Error(`Form not found: ${formId}`);
 
       const wanted = norm(key);
@@ -789,16 +803,14 @@ export class ActionExecutor {
         kind,
         type,
       };
-    }, { formId, key });
+    }, { formId, key, prefix });
 
     return field as FieldRef;
   }
 
   private async readField(page: Page, fieldId: string): Promise<FieldState> {
-    return page.evaluate((fieldId) => {
-      const el = findField(fieldId);
-      if (!el) throw new Error(`Field not found: ${fieldId}`);
-
+    const locator = await this.locatorForAny(page, fieldId);
+    return locator.evaluate((el, fieldId) => {
       if (el instanceof HTMLSelectElement) {
         return {
           id: fieldId,
@@ -821,11 +833,6 @@ export class ActionExecutor {
         };
       }
       throw new Error(`Unsupported field: ${fieldId}`);
-
-      function findField(id: string): Element | null {
-        const escaped = id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        return document.getElementById(id) ?? document.querySelector(`[data-llm-browser-id="${escaped}"]`);
-      }
     }, fieldId) as Promise<FieldState>;
   }
 
@@ -850,22 +857,20 @@ export class ActionExecutor {
   }
 
   private async setCheck(page: Page, fieldId: string, checked: boolean): Promise<void> {
-    await page.evaluate(({ fieldId, checked }) => {
-      const escaped = fieldId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      const el = document.getElementById(fieldId) ?? document.querySelector(`[data-llm-browser-id="${escaped}"]`);
+    const locator = await this.locatorForAny(page, fieldId);
+    await locator.evaluate((el, checked) => {
       if (!(el instanceof HTMLInputElement) || !['checkbox', 'radio'].includes(el.type)) {
-        throw new Error(`Checkbox/radio not found: ${fieldId}`);
+        throw new Error('Checkbox/radio not found');
       }
       if (el.checked !== checked) el.click();
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, { fieldId, checked });
+    }, checked);
   }
 
   private async validateForm(page: Page, formId: string): Promise<{ valid: boolean; errors: any[] }> {
-    return page.evaluate((formId) => {
-      const escaped = formId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      const form = document.getElementById(formId) ?? document.querySelector(`[data-llm-browser-id="${escaped}"]`);
+    const locator = await this.locatorForAny(page, formId);
+    return locator.evaluate((form, formId) => {
       if (!(form instanceof HTMLFormElement)) throw new Error(`Form not found: ${formId}`);
 
       const controls = Array.from(form.querySelectorAll('input, select, textarea')).filter(
@@ -889,11 +894,9 @@ export class ActionExecutor {
 
   private async restoreFields(page: Page, fields: FieldState[]): Promise<void> {
     for (const field of fields.reverse()) {
-      await page.evaluate((field) => {
-        const escaped = field.id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-        const el = document.getElementById(field.id) ?? document.querySelector(`[data-llm-browser-id="${escaped}"]`);
-        if (!el) return;
-
+      const locator = await this.locatorForAny(page, field.id).catch(() => undefined);
+      if (!locator) continue;
+      await locator.evaluate((el, field) => {
         if (field.kind === 'select' && el instanceof HTMLSelectElement) {
           const values = new Set(Array.isArray(field.value) ? field.value.map(String) : [String(field.value ?? '')]);
           for (const option of Array.from(el.options)) option.selected = values.has(option.value);
@@ -910,11 +913,8 @@ export class ActionExecutor {
 
   private async elementState(page: Page, targetId: string | undefined, state: string, expected: unknown): Promise<boolean> {
     if (!targetId) return false;
-    return page.evaluate(({ targetId, state, expected }) => {
-      const escaped = targetId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      const el = document.getElementById(targetId) ?? document.querySelector(`[data-llm-browser-id="${escaped}"]`);
-      if (!el) return false;
-
+    const locator = await this.locatorForAny(page, targetId);
+    return locator.evaluate((el, { state, expected }) => {
       let actual: unknown;
       if (state === 'disabled') {
         actual = 'disabled' in el ? Boolean((el as HTMLButtonElement | HTMLInputElement | HTMLSelectElement).disabled) : false;
@@ -930,7 +930,7 @@ export class ActionExecutor {
       }
 
       return expected === undefined ? Boolean(actual) : actual === expected;
-    }, { targetId, state, expected });
+    }, { state, expected });
   }
 
   private async pageSlice(page: Page, index: number): Promise<Record<string, any>> {
@@ -958,7 +958,7 @@ export class ActionExecutor {
   private async resolveActionableLocator(page: Page, targetId: string | undefined, action: string): Promise<Locator> {
     if (!targetId) throw new Error(`Target ID is required for ${action} action`);
 
-    const locator = this.locatorFor(page, targetId);
+    const locator = await this.locatorForAny(page, targetId);
     await locator.waitFor({ state: 'visible', timeout: 5000 });
 
     const isDisabled = await locator.isDisabled().catch(() => false);
@@ -967,9 +967,19 @@ export class ActionExecutor {
     return locator;
   }
 
-  private locatorFor(page: Page, targetId: string): Locator {
+  private async locatorForAny(page: Page, targetId: string): Promise<Locator> {
     const escaped = targetId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    return page.locator(`[data-llm-browser-id="${escaped}"], [id="${escaped}"]`).first();
+    const selector = `[data-llm-browser-id="${escaped}"], [id="${escaped}"]`;
+    const main = page.locator(selector).first();
+    if ((await main.count().catch(() => 0)) > 0) return main;
+
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame()) continue;
+      const locator = frame.locator(selector).first();
+      if ((await locator.count().catch(() => 0)) > 0) return locator;
+    }
+
+    return main;
   }
 
   private async submitLocator(page: Page, locator: Locator, timeoutMs: number): Promise<void> {

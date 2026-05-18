@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { Page } from 'playwright';
+import { Frame, Page } from 'playwright';
 import { SemanticSnapshot } from '../common/types';
 
 export interface SemCacheEntry {
@@ -127,7 +127,39 @@ export class SemCache {
 export const globalSemCache = new SemCache();
 
 export async function semKey(page: Page): Promise<{ key: string; url: string; title: string }> {
-  const data = await page.evaluate(() => {
+  const main = await page.evaluate(cacheDomState);
+  const frames = [];
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const url = frame.url();
+    const depth = frameDepth(frame);
+    const same_origin = isSameOrigin(page.url(), url);
+    if (same_origin && depth <= 3) {
+      frames.push({
+        url,
+        depth,
+        same_origin,
+        content: await frame.evaluate(cacheDomState).catch(() => undefined),
+      });
+    } else {
+      frames.push({ url, depth, same_origin, content: undefined });
+    }
+  }
+
+  const data: Record<string, any> = {
+    ...main,
+    frames,
+  };
+
+  const digest = createHash('sha256').update(JSON.stringify(data)).digest('hex');
+  return {
+    key: digest,
+    url: String(main.url ?? page.url()),
+    title: String(main.title ?? ''),
+  };
+}
+
+function cacheDomState(): Record<string, any> {
     const clone = document.documentElement.cloneNode(true) as Element;
     for (const el of Array.from(clone.querySelectorAll('[data-llm-browser-id]'))) {
       el.removeAttribute('data-llm-browser-id');
@@ -148,15 +180,43 @@ export async function semKey(page: Page): Promise<{ key: string; url: string; ti
       title: document.title,
       html: clone.outerHTML,
       controls,
+      shadow: Array.from(document.querySelectorAll('*'))
+        .map((node) => {
+          const el = node as HTMLElement;
+          const root = el.shadowRoot ?? (window as any).__llmBrowserShadowRoots?.rootFor?.(el);
+          if (!root) return undefined;
+          const template = document.createElement('template');
+          template.innerHTML = root.innerHTML;
+          for (const shadowEl of Array.from(template.content.querySelectorAll('[data-llm-browser-id]'))) {
+            shadowEl.removeAttribute('data-llm-browser-id');
+          }
+          return {
+            host: el.id || el.tagName.toLowerCase(),
+            mode: el.shadowRoot ? 'open' : 'closed',
+            html: template.innerHTML,
+          };
+        })
+        .filter(Boolean),
     };
-  });
+}
 
-  const digest = createHash('sha256').update(JSON.stringify(data)).digest('hex');
-  return {
-    key: digest,
-    url: data.url,
-    title: data.title,
-  };
+function frameDepth(frame: Frame): number {
+  let depth = 0;
+  let current = frame.parentFrame();
+  while (current) {
+    depth += 1;
+    current = current.parentFrame();
+  }
+  return depth;
+}
+
+function isSameOrigin(parentUrl: string, childUrl: string): boolean {
+  try {
+    if (!childUrl || childUrl === 'about:blank' || childUrl === 'about:srcdoc') return true;
+    return new URL(parentUrl).origin === new URL(childUrl, parentUrl).origin;
+  } catch {
+    return false;
+  }
 }
 
 function clone<T>(value: T): T {

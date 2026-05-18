@@ -15,8 +15,9 @@ describe('BrowserClient SDK', () => {
     }) as any;
 
     const client = new BrowserClient({ baseUrl: 'http://example.test', fetchImpl });
-    const session = await client.createSession();
+    const session = await client.createSession({ viewport: 'mobile' });
     const result = await session.type('email', 'user@example.com', { press_enter: true });
+    await session.setViewport({ width: 1024, height: 768 });
     await session.upload('file', { file_path: '/uploads/a.txt' });
     await session.screenshotFile({ file_name: 'page.png' });
     await session.pdf({ file_name: 'page.pdf' });
@@ -24,25 +25,30 @@ describe('BrowserClient SDK', () => {
 
     expect(session.id).toBe('session-1');
     expect(result.action).toBe('type');
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ viewport: 'mobile' });
     expect(JSON.parse(String(calls[1].init?.body))).toEqual({
       action: 'type',
       target_id: 'email',
       params: { text: 'user@example.com', press_enter: true },
     });
     expect(JSON.parse(String(calls[2].init?.body))).toEqual({
+      action: 'set_viewport',
+      params: { width: 1024, height: 768 },
+    });
+    expect(JSON.parse(String(calls[3].init?.body))).toEqual({
       action: 'upload',
       target_id: 'file',
       params: { file_path: '/uploads/a.txt' },
     });
-    expect(JSON.parse(String(calls[3].init?.body))).toEqual({
+    expect(JSON.parse(String(calls[4].init?.body))).toEqual({
       action: 'screenshot_file',
       params: { file_name: 'page.png' },
     });
-    expect(JSON.parse(String(calls[4].init?.body))).toEqual({
+    expect(JSON.parse(String(calls[5].init?.body))).toEqual({
       action: 'pdf',
       params: { file_name: 'page.pdf' },
     });
-    expect(JSON.parse(String(calls[5].init?.body))).toEqual({
+    expect(JSON.parse(String(calls[6].init?.body))).toEqual({
       action: 'fs',
       params: { operation: 'write', path: '/uploads/a.txt', content: 'a' },
     });

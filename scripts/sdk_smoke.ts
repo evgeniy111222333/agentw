@@ -29,6 +29,7 @@ async function main() {
   let importedSession: any;
 
   try {
+    const viewport = await session.setViewport('mobile');
     const navigate = await session.navigate(`${fixtureBaseUrl}/page`);
     const openedTab = await session.openTab(`${fixtureBaseUrl}/tab?title=${encodeURIComponent('SDK Tab')}`);
     const openedTabId = openedTab.data?.tab?.tab_id;
@@ -70,6 +71,14 @@ async function main() {
     const wsSnapshot = await socket.call('snapshot', { session_id: session.id });
     socket.close();
 
+    const streamSocket = session.socket();
+    const streamEvents: any[] = [];
+    streamSocket.onEvent((event) => streamEvents.push(event));
+    await streamSocket.subscribe({ events: ['page_changed', 'action_completed'] });
+    await session.snapshot({ max_elements: 50 });
+    await waitForStream(streamEvents, ['page_changed', 'action_completed']);
+    streamSocket.close();
+
     const sessionPack = await session.export();
     importedSession = await client.importSession(sessionPack);
     const importedSnapshot = await importedSession.snapshot();
@@ -108,6 +117,13 @@ async function main() {
             },
             closed: closedTab.data?.closed_tab_id,
             final_count: tabsFinal.length,
+          },
+          viewport: {
+            status: viewport.status,
+            width: viewport.data?.viewport?.width,
+            height: viewport.data?.viewport?.height,
+            profile: viewport.data?.viewport?.profile,
+            snapshot_width: viewport.snapshot.meta?.viewport?.width,
           },
           typed: summarize(typed),
           filled: summarize(filled),
@@ -181,6 +197,11 @@ async function main() {
             recent_console: consoleEvents.events.slice(-3).map((event) => ({ level: event.level, text: event.text })),
           },
           ws_snapshot_elements: wsSnapshot.snapshot.elements.length,
+          ws_stream: {
+            events: streamEvents.map((event) => event.type),
+            page_changed: streamEvents.some((event) => event.type === 'page_changed'),
+            action_completed: streamEvents.some((event) => event.type === 'action_completed'),
+          },
           snapshot_meta: {
             max_elements: navigate.snapshot.meta?.max_elements,
             semantic_nodes_total: navigate.snapshot.meta?.semantic_nodes_total,
@@ -211,6 +232,15 @@ async function pollUntilDone(session: any, operationId: string) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`operation ${operationId} did not finish`);
+}
+
+async function waitForStream(events: any[], expectedTypes: string[]) {
+  const started = Date.now();
+  while (Date.now() - started < 5000) {
+    if (expectedTypes.every((type) => events.some((event) => event.type === type))) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`stream events missing: expected=${expectedTypes.join(',')} seen=${events.map((event) => event.type).join(',')}`);
 }
 
 function summarize(result: any) {

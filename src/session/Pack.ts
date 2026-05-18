@@ -1,4 +1,4 @@
-import { ActionRecord, SemanticSnapshot, SessionState } from '../common/types';
+import { ActionRecord, SemanticSnapshot, SessionState, ViewportState } from '../common/types';
 
 export const SESSION_PACK_VERSION = 'session-pack/1.0';
 
@@ -13,6 +13,7 @@ export interface SessionPack {
   page: {
     url: string;
     title: string;
+    viewport?: ViewportState;
   };
   snapshot?: SemanticSnapshot;
 }
@@ -21,7 +22,7 @@ export function makePack(input: {
   session: SessionState;
   actions: ActionRecord[];
   storageState: Record<string, any>;
-  page: { url: string; title: string };
+  page: { url: string; title: string; viewport?: ViewportState };
   snapshot?: SemanticSnapshot;
 }): SessionPack {
   return {
@@ -57,6 +58,7 @@ export function readPack(raw: any): SessionPack {
     page: {
       url: String(pack.page?.url ?? pack.session.current_url ?? ''),
       title: String(pack.page?.title ?? ''),
+      viewport: pack.page?.viewport ? clone(pack.page.viewport) : pack.session.viewport ? clone(pack.session.viewport) : undefined,
     },
     snapshot: pack.snapshot ? clone(pack.snapshot) : undefined,
   };
@@ -112,6 +114,7 @@ function normalizeTabs(pack: SessionPack, sessionId: string): SessionState['tabs
       title: active ? pack.page.title || tab.title || '' : tab.title || '',
       active,
       form_states: tab.form_states,
+      viewport: tab.viewport ?? pack.page.viewport ?? pack.session.viewport,
     };
   });
   if (!normalized.some((tab) => tab.active)) normalized[0].active = true;

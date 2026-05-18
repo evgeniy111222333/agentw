@@ -1,6 +1,7 @@
 import { chromium } from 'playwright';
 import { SemanticLayer } from '../src/layer4_semantic/SemanticLayer';
 import { BrowserCore } from '../src/layer1_browser_core/BrowserCore';
+import { viewProfiles } from '../src/device/View';
 
 async function main() {
   const browser = await chromium.launch({
@@ -31,6 +32,14 @@ async function main() {
       session: { ...session, history_length: 1 },
       previousSnapshot: first,
     });
+    await page.setViewportSize({ width: viewProfiles.mobile.width, height: viewProfiles.mobile.height });
+    const mobile = await semanticLayer.createSnapshot(page, {
+      session: {
+        ...session,
+        viewport: viewProfiles.mobile,
+      },
+      previousSnapshot: second,
+    });
 
     const report = {
       first_snapshot: {
@@ -44,6 +53,7 @@ async function main() {
         compression_ratio: first.meta?.compression_ratio,
         max_elements: first.meta?.max_elements,
         semantic_nodes_total: first.meta?.semantic_nodes_total,
+        encapsulation: first.meta?.encapsulation,
         privacy: first.meta?.privacy,
         plugin_contributions: first.meta?.plugin_contributions,
         sam_actions: first.available_actions.filter((action) => action.source?.standard === 'SAM').length,
@@ -78,6 +88,14 @@ async function main() {
         privacy: second.meta?.privacy,
         plugin_contributions: second.meta?.plugin_contributions,
       },
+      mobile_snapshot: {
+        elements: mobile.elements.length,
+        actions: mobile.available_actions.length,
+        extraction_ms: mobile.meta?.extraction_time,
+        viewport: mobile.meta?.viewport,
+        cache_status: mobile.meta?.cache_status,
+        delta_operations: mobile.delta?.operations.length ?? 0,
+      },
       tabs: await measureTabs(),
     };
 
@@ -93,6 +111,10 @@ async function measureTabs() {
   try {
     const sessionId = 'measurement-tabs';
     await core.createSession(sessionId);
+    const viewportStarted = performance.now();
+    const viewport = await core.setViewport(sessionId, 'mobile');
+    const viewportMs = Math.round(performance.now() - viewportStarted);
+
     const openStarted = performance.now();
     const opened = await core.openTab(sessionId, `data:text/html;charset=utf-8,${encodeURIComponent(tabHtml('Measure Tab'))}`);
     const openMs = Math.round(performance.now() - openStarted);
@@ -116,6 +138,8 @@ async function measureTabs() {
 
     return {
       open_ms: openMs,
+      viewport_ms: viewportMs,
+      viewport,
       list_ms: listMs,
       switch_ms: switchMs,
       close_ms: closeMs,
@@ -170,6 +194,10 @@ function benchmarkHtml(): string {
         <button type="submit">Pay now</button>
       </form>
       <a download="invoice.csv" href="data:text/csv;base64,aXRlbSxwcmljZQpjcmVkaXRzLDIw">Download invoice</a>
+      <iframe id="measure-frame" title="Embedded checkout helper" srcdoc="<button id='frame-help'>Frame Help</button><input id='frame-note' placeholder='Frame note'>"></iframe>
+      <iframe id="measure-video" title="Demo video" src="https://www.youtube.com/embed/abc123"></iframe>
+      <iframe id="measure-ad" width="300" height="250" data-ad-client="ca-pub-1" src="https://googleads.g.doubleclick.net/pagead/ads"></iframe>
+      <measure-card id="measure-card"><span slot="label">Slotted benchmark label</span></measure-card>
       <button
         data-semantic-action="add_credits"
         data-semantic-label="Add credits to cart"
@@ -196,6 +224,14 @@ function benchmarkHtml(): string {
         <tr><th>Item</th><th>Price</th></tr>
         <tr><td>API credits</td><td>$20</td></tr>
       </table>
+      <script>
+        customElements.define('measure-card', class extends HTMLElement {
+          connectedCallback() {
+            const root = this.attachShadow({ mode: 'open' });
+            root.innerHTML = '<button id="shadow-action">Shadow Action</button><slot name="label"></slot>';
+          }
+        });
+      </script>
     </main>
   </body>
 </html>`;

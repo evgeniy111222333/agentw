@@ -7,11 +7,13 @@ import { ContentExtractor } from './extractor/ContentExtractor';
 import { DOMTraverser } from './traverser/DOMTraverser';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { SemanticElement, SemanticSnapshot, SessionInfo, SnapshotMeta } from '../common/types';
+import { globalEventBus } from '../common/EventBus';
 import { createDefaultPluginRegistry, PluginRegistry } from '../plugins/PluginRegistry';
 import { globalMetrics } from '../common/MetricsRegistry';
 import { globalSemCache, semKey } from '../cache/Sem';
 import { AuthTracker } from '../auth/Auth';
 import { maskSnapshot } from '../privacy/Mask';
+import { viewSignature } from '../device/View';
 
 export interface SnapshotBuildOptions {
   previousSnapshot?: SemanticSnapshot;
@@ -81,6 +83,7 @@ export class SemanticLayer {
             requestedMaxElements ?? config.max_elements,
             config.adaptive_max_elements ? 'adaptive' : 'fixed',
             config.max_elements_hard_limit,
+            viewSignature(options.session.viewport),
           ].join(':'),
         }
       : undefined;
@@ -158,6 +161,16 @@ export class SemanticLayer {
       cache_entries: globalSemCache.stats().entries,
       incomplete,
       trace_id: options.traceId,
+      viewport: options.session.viewport,
+      encapsulation: {
+        iframe_count: traversal.stats.iframe_count,
+        iframe_extracted_count: traversal.stats.iframe_extracted_count,
+        iframe_skipped_ads: traversal.stats.iframe_skipped_ads,
+        iframe_depth_limited: traversal.stats.iframe_depth_limited,
+        shadow_root_count: traversal.stats.shadow_root_count,
+        closed_shadow_roots: traversal.stats.closed_shadow_roots,
+        max_frame_depth: traversal.stats.max_frame_depth,
+      },
       plugin_contributions: {
         ...pluginResult.stats,
         plugins: pluginResult.metadata,
@@ -166,6 +179,18 @@ export class SemanticLayer {
     };
 
     snapshot.meta = dropUndefined(meta);
+    if (traversal.stats.closed_shadow_roots > 0) {
+      void globalEventBus.publish('stream_event', {
+        type: 'security',
+        session_id: options.session.session_id,
+        tab_id: options.session.tab_id,
+        timestamp: new Date().toISOString(),
+        data: {
+          event: 'closed_shadow_dom_access',
+          closed_shadow_roots: traversal.stats.closed_shadow_roots,
+        },
+      });
+    }
     const snapshotBytes = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
     snapshot.meta.snapshot_bytes = snapshotBytes;
     snapshot.meta.token_estimate = Math.ceil(snapshotBytes / 4);
@@ -204,6 +229,7 @@ export class SemanticLayer {
       total_time: options.totalTime,
       extraction_time: Math.round(performance.now() - extractionStart),
       trace_id: options.traceId,
+      viewport: options.session.viewport,
       cache_status: 'hit' as const,
       cache_key: cacheKey,
       cache_age_ms: cacheAgeMs,

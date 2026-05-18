@@ -35,17 +35,21 @@ class BrowserClientTest(unittest.TestCase):
     def test_session_actions_and_snapshot_budget(self):
         transport = FakeTransport()
         client = BrowserClient(transport=transport, timeout=7)
-        session = client.create_session()
+        session = client.create_session(viewport="mobile")
 
         nav = session.navigate("https://example.test")
         snap = session.snapshot(max_elements=120)
         typed = session.type("email", "ada@example.com", clear=True)
+        sized = session.set_viewport({"width": 390, "height": 844})
         session.close()
 
         self.assertEqual(session.id, "s1")
         self.assertEqual(nav["action"], "navigate")
         self.assertEqual(snap["snapshot"]["meta"]["max_elements"], 120)
         self.assertEqual(typed["echo"]["params"]["clear"], True)
+        self.assertEqual(sized["action"], "set_viewport")
+        self.assertEqual(transport.calls[0]["body"], {"viewport": "mobile"})
+        self.assertEqual(transport.calls[-2]["body"]["params"], {"width": 390, "height": 844})
         self.assertIn(
             {"method": "GET", "path": "/api/v2/sessions/s1/snapshot?max_elements=120", "body": None, "timeout": 7},
             transport.calls,

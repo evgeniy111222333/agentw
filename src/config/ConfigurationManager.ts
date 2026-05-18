@@ -13,6 +13,9 @@ export interface SemanticConfig {
   adaptive_max_elements: boolean;
   max_text_length: number;
   visible_only: boolean;
+  include_shadow_dom: boolean;
+  include_iframes: boolean;
+  max_frame_depth: number;
   group_similar: boolean;
   extraction_timeout_ms: number;
   stabilization_ms: number;
@@ -100,6 +103,9 @@ export class ConfigurationManager {
         adaptive_max_elements: envBoolean('LLM_BROWSER_ADAPTIVE_MAX_ELEMENTS', true),
         max_text_length: 10000,
         visible_only: true,
+        include_shadow_dom: envBoolean('LLM_BROWSER_INCLUDE_SHADOW_DOM', true),
+        include_iframes: envBoolean('LLM_BROWSER_INCLUDE_IFRAMES', true),
+        max_frame_depth: envNumber('LLM_BROWSER_MAX_FRAME_DEPTH', 3),
         group_similar: true,
         extraction_timeout_ms: 2000,
         stabilization_ms: envNumber('LLM_BROWSER_SEMANTIC_STABILIZATION_MS', 150),

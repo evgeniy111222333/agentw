@@ -13,5 +13,8 @@ export type {
   RuntimeEventInfo,
   RuntimeEventKind,
   RuntimeEventStats,
+  StreamEvent,
+  StreamEventType,
+  StreamSubscribeOptions,
   TabState,
 } from './types';

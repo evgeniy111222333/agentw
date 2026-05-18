@@ -133,6 +133,7 @@ function traversal(
       disabled: false,
       required: false,
       selector: `#${node.id ?? 'node'}`,
+      origin: node.origin ?? 'main',
     })),
     stats: {
       dom_nodes_count: stats.dom_nodes_count ?? nodes.length,
@@ -144,6 +145,13 @@ function traversal(
       raw_dom_bytes: 1000,
       max_elements: stats.max_elements ?? 300,
       max_elements_requested: stats.max_elements_requested,
+      iframe_count: 0,
+      iframe_extracted_count: 0,
+      iframe_skipped_ads: 0,
+      iframe_depth_limited: 0,
+      shadow_root_count: 0,
+      closed_shadow_roots: 0,
+      max_frame_depth: 0,
     },
   };
 }

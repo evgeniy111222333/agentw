@@ -6,6 +6,7 @@ import { SemanticLayer } from '../layer4_semantic/SemanticLayer';
 import { globalMetrics } from '../common/MetricsRegistry';
 import { ActionRecord, AvailableAction, SemanticSnapshot, SessionInfo } from '../common/types';
 import { LlmBrowserError, normalizeError } from '../common/errors';
+import { globalEventBus } from '../common/EventBus';
 import { globalAuditLog, riskScoreForAction } from '../common/AuditLog';
 import { SecurityPolicy } from '../security/SecurityPolicy';
 import { OpStart, OpStatus, OpStore } from '../op/Op';
@@ -64,6 +65,7 @@ const actionSchemas: Record<string, ActionSchema> = {
   click: { target: 'required', retryable: true },
   go_back: { target: 'none', retryable: true },
   hover: { target: 'required', retryable: true },
+  interact: { target: 'required', retryable: true },
   keyboard: { target: 'none', requiredParams: ['key'] },
   navigate: { target: 'none', requiredParams: ['url'], retryable: true },
   open_tab: { target: 'none', retryable: true },
@@ -71,6 +73,11 @@ const actionSchemas: Record<string, ActionSchema> = {
   switch_tab: { target: 'optional', retryable: true },
   close_tab: { target: 'optional', retryable: true },
   list_tabs: { target: 'none' },
+  set_viewport: {
+    target: 'none',
+    validate: validateViewportParams,
+    retryable: true,
+  },
   refresh: { target: 'none', retryable: true },
   screenshot: { target: 'optional', retryable: true },
   screenshot_file: { target: 'optional', retryable: true },
@@ -422,6 +429,39 @@ export class CommandRouter {
       });
       globalTraceStore.finish(traceId, 'success', totalTime);
       globalMetrics.increment('llm_browser_traces_completed_total');
+      void globalEventBus.publish('stream_event', {
+        type: 'page_changed',
+        session_id: command.session_id,
+        tab_id: snapshot.session.tab_id,
+        timestamp: new Date().toISOString(),
+        data: {
+          url: snapshot.url,
+          title: snapshot.title,
+          snapshot_id: snapshot.snapshot_id,
+          action,
+          trace_id: traceId,
+          element_count: snapshot.elements.length,
+          delta_operations: snapshot.delta?.operations.length ?? 0,
+          delta_stats: snapshot.delta?.stats,
+          cache_status: snapshot.meta?.cache_status,
+        },
+      });
+      void globalEventBus.publish('stream_event', {
+        type: 'action_completed',
+        session_id: command.session_id,
+        tab_id: snapshot.session.tab_id,
+        timestamp: new Date().toISOString(),
+        data: {
+          action,
+          action_id: actionId,
+          target_id: command.target_id ?? resolvedAction.targetId,
+          trace_id: traceId,
+          duration_ms: totalTime,
+          action_ms: execution?.duration_ms ?? 0,
+          extraction_ms: snapshot.meta?.extraction_time ?? 0,
+          token_estimate: snapshot.meta?.token_estimate,
+        },
+      });
 
       return {
         status: 'success',
@@ -482,6 +522,19 @@ export class CommandRouter {
         code: normalized.code,
       });
       globalMetrics.increment('llm_browser_traces_failed_total');
+      void globalEventBus.publish('stream_event', {
+        type: 'error',
+        session_id: command.session_id,
+        timestamp: new Date().toISOString(),
+        data: {
+          action,
+          target_id: command.target_id ?? resolvedAction?.targetId,
+          trace_id: traceId,
+          code: normalized.code,
+          message: normalized.message,
+          recoverable: normalized.recoverable,
+        },
+      });
       throw normalized;
     }
   }
@@ -645,6 +698,7 @@ export class CommandRouter {
       tabs_count: state?.tabs.length ?? 1,
       history_length: state?.history.length ?? 0,
       cookies_count: state?.cookies.length ?? 0,
+      viewport: this.browserCore.getViewport(sessionId),
     };
   }
 
@@ -743,6 +797,7 @@ function estimateMs(action: string, params: Record<string, any>): number {
   if (typeof params.estimated_time_ms === 'number') return params.estimated_time_ms;
   if (action === 'navigate') return Number(params.timeout_ms ?? 5000);
   if (action === 'open_tab' || action === 'new_tab') return params.url ? Number(params.timeout_ms ?? 5000) : 500;
+  if (action === 'set_viewport') return 300;
   if (action === 'wait_for') return Number(params.timeout_ms ?? 10000);
   if (action === 'wait') return Math.min(Number(params.ms ?? 500), 10000);
   if (['download', 'upload', 'screenshot_file', 'screenshot_to_file', 'pdf', 'pdf_generate'].includes(action)) return 2000;
@@ -777,6 +832,20 @@ function validateFsParams(params: Record<string, any>): void {
     params.base64 === undefined
   ) {
     throw new LlmBrowserError('MISSING_PARAM', 'content or base64 is required for fs write');
+  }
+}
+
+function validateViewportParams(params: Record<string, any>): void {
+  const value = params.viewport ?? params;
+  if (typeof value === 'string') return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new LlmBrowserError('INVALID_PARAMS', 'set_viewport requires viewport profile or width/height');
+  }
+  const width = Number(value.width);
+  const height = Number(value.height);
+  const profile = value.profile ?? value.device ?? value.name;
+  if (profile === undefined && (!Number.isFinite(width) || !Number.isFinite(height))) {
+    throw new LlmBrowserError('MISSING_PARAM', 'set_viewport requires width/height or profile');
   }
 }
 

@@ -26,7 +26,8 @@ export class StateManagementLayer {
       cookies: initial.cookies ?? [],
       localStorage: initial.localStorage ?? {},
       history: initial.history ?? [],
-      configuration: initial.configuration ?? {}
+      configuration: initial.configuration ?? {},
+      viewport: initial.viewport,
     });
     this.actionHistory.set(sessionId, []);
   }
@@ -93,6 +94,7 @@ export class StateManagementLayer {
       return {
         ...tab,
         active: index === 0 ? Boolean(tab.active || !tabs.some((candidate) => candidate.active)) : Boolean(tab.active),
+        viewport: tab.viewport ?? old?.viewport,
         snapshot_id: old?.snapshot_id,
         form_states: old?.form_states,
       };
@@ -102,6 +104,7 @@ export class StateManagementLayer {
     const activeTab = normalized.find((tab) => tab.active) ?? normalized[0];
     session.tabs = normalized;
     session.current_url = activeTab?.url ?? session.current_url;
+    session.viewport = activeTab?.viewport ?? session.viewport;
     session.updated_at = new Date().toISOString();
     this.sessions.set(sessionId, session);
   }

@@ -45,8 +45,9 @@ class BrowserClient:
         self.retry_base_delay = retry_base_delay
         self.transport = transport
 
-    def create_session(self) -> "BrowserSession":
-        data = self._request("POST", "/api/v2/sessions")
+    def create_session(self, *, viewport: Mapping[str, Any] | str | None = None) -> "BrowserSession":
+        body = {"viewport": viewport} if viewport is not None else None
+        data = self._request("POST", "/api/v2/sessions", body)
         return BrowserSession(self, data["session_id"])
 
     def list_sessions(self, page: int = 1, limit: int = 20) -> Json:
@@ -299,6 +300,10 @@ class BrowserSession:
     def fill_form(self, form_id: str, fields: Mapping[str, Any], submit: bool = False) -> Json:
         return self.client.execute_action(self.id, "fill_form", target_id=form_id, params={"fields": dict(fields), "submit": submit})
 
+    def set_viewport(self, viewport: Mapping[str, Any] | str) -> Json:
+        params = {"profile": viewport} if isinstance(viewport, str) else dict(viewport)
+        return self.client.execute_action(self.id, "set_viewport", params=params)
+
     def start(self, action: str, **options: Any) -> Json:
         return self.client.start_action(self.id, action, **options)
 
@@ -340,8 +345,8 @@ class AsyncBrowserClient:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._sync = BrowserClient(*args, **kwargs)
 
-    async def create_session(self) -> "AsyncBrowserSession":
-        session = await asyncio.to_thread(self._sync.create_session)
+    async def create_session(self, **kwargs: Any) -> "AsyncBrowserSession":
+        session = await asyncio.to_thread(self._sync.create_session, **kwargs)
         return AsyncBrowserSession(self, session.id)
 
     async def import_session(self, pack: Mapping[str, Any], **kwargs: Any) -> "AsyncBrowserSession":
@@ -399,6 +404,10 @@ class AsyncBrowserSession:
 
     async def fill_form(self, form_id: str, fields: Mapping[str, Any], submit: bool = False) -> Json:
         return await self.client.execute_action(self.id, "fill_form", target_id=form_id, params={"fields": dict(fields), "submit": submit})
+
+    async def set_viewport(self, viewport: Mapping[str, Any] | str) -> Json:
+        params = {"profile": viewport} if isinstance(viewport, str) else dict(viewport)
+        return await self.client.execute_action(self.id, "set_viewport", params=params)
 
     async def poll(self, operation_id: str) -> Json:
         return await self.client.get_op(operation_id)

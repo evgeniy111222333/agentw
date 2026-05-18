@@ -14,6 +14,7 @@ describe('ContentExtractor', () => {
       disabled: false,
       required: false,
       selector: '[id="form-1"]',
+      origin: 'main',
       form: {
         action: '/checkout',
         method: 'POST',
@@ -40,6 +41,7 @@ describe('ContentExtractor', () => {
       disabled: false,
       required: true,
       selector: '[id="password"]',
+      origin: 'main',
     };
 
     expect(extractor.extract(node, 'input')).toEqual(expect.objectContaining({

@@ -6,7 +6,7 @@ import { StateManagementLayer } from '../layer3_state_management/StateManagement
 import { ActionExecutor } from '../layer2_action_execution/ActionExecutor';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { SemanticLayer } from '../layer4_semantic/SemanticLayer';
-import { SemanticSnapshot } from '../common/types';
+import { SemanticSnapshot, ViewportState } from '../common/types';
 import { globalMetrics } from '../common/MetricsRegistry';
 import { LlmBrowserError, normalizeError } from '../common/errors';
 import { CommandRouter } from './CommandRouter';
@@ -116,12 +116,13 @@ export class ApiServer {
       res.json(paginate(sessions, req.query, '/api/v2/sessions'));
     });
 
-    this.app.post('/api/v2/sessions', async (_req, res) => {
+    this.app.post('/api/v2/sessions', async (req, res) => {
       try {
         await this.pruneExpiredSessions();
         const sessionId = randomUUID();
-        await this.browserCore.createSession(sessionId);
-        this.stateManager.registerSession(sessionId);
+        const viewport = viewportBody(req.body);
+        await this.browserCore.createSession(sessionId, { viewport });
+        this.stateManager.registerSession(sessionId, { viewport: this.browserCore.getViewport(sessionId) });
 
         const page = this.browserCore.getPage(sessionId);
         await this.stateManager.injectMutationObserver(page, sessionId);
@@ -143,9 +144,13 @@ export class ApiServer {
           throw new LlmBrowserError('INVALID_PARAMS', 'Session ID already exists', { session_id: sessionId });
         }
 
-        await this.browserCore.createSession(sessionId, { storageState: pack.browser.storage_state });
+        const viewport = viewportBody(req.body) ?? pack.session.viewport;
+        await this.browserCore.createSession(sessionId, { storageState: pack.browser.storage_state, viewport });
         const restoredSession = importedSession(pack, sessionId);
-        this.stateManager.registerSession(sessionId, restoredSession);
+        this.stateManager.registerSession(sessionId, {
+          ...restoredSession,
+          viewport: this.browserCore.getViewport(sessionId),
+        });
         this.stateManager.setActionHistory(sessionId, importedActions(pack, sessionId));
         const snapshot = importedSnapshot(pack, sessionId);
         if (snapshot) this.previousSnapshots.set(snapKey(sessionId, snapshot.session.tab_id), snapshot);
@@ -196,6 +201,7 @@ export class ApiServer {
           page: {
             url: page.url(),
             title: await page.title(),
+            viewport: this.browserCore.getViewport(req.params.id),
           },
           snapshot: this.activeSnapshot(req.params.id),
         });
@@ -575,6 +581,10 @@ function numberQuery(value: unknown): number | undefined {
   if (typeof value !== 'string' || value.trim() === '') return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function viewportBody(body: any): ViewportState | string | undefined {
+  return body?.viewport ?? body?.device ?? body?.profile;
 }
 
 function enrichSession(session: any, storageState: any, pageUrl: string): any {

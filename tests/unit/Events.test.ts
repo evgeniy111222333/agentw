@@ -50,6 +50,43 @@ describe('Events', () => {
     events.clear('session');
     expect(events.stats('session').total).toBe(0);
   });
+
+  it('records navigation, dialog, and download browser events', async () => {
+    const events = new Events(20);
+    const page: any = new EventEmitter();
+    const mainFrame = { url: () => 'https://app.test/page?token=secret' };
+    page.mainFrame = () => mainFrame;
+    page.title = () => Promise.resolve('Page Title');
+    page.url = () => 'https://app.test/page';
+    events.attach('session', 'tab-1', page);
+
+    const dismiss = jest.fn(() => Promise.resolve());
+    page.emit('framenavigated', mainFrame);
+    page.emit('dialog', {
+      type: () => 'alert',
+      message: () => 'confirm it',
+      defaultValue: () => '',
+      dismiss,
+    });
+    page.emit('download', {
+      url: () => 'https://app.test/file.csv?code=secret',
+      suggestedFilename: () => 'file.csv',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const recorded = events.list('session', { limit: 10 });
+    expect(recorded.map((event) => event.kind)).toEqual(['dialog', 'download', 'navigation']);
+    expect(recorded.find((event) => event.kind === 'dialog')).toEqual(expect.objectContaining({
+      dialog_type: 'alert',
+      text: 'confirm it',
+      handled: 'dismissed',
+    }));
+    expect(recorded.find((event) => event.kind === 'download')).toEqual(expect.objectContaining({
+      file_name: 'file.csv',
+    }));
+    expect(JSON.stringify(recorded)).not.toContain('secret');
+    expect(dismiss).toHaveBeenCalledTimes(1);
+  });
 });
 
 function fakeRequest(url: string): any {

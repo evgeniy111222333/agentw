@@ -6,11 +6,15 @@ export class ContentExtractor {
     const content: Record<string, any> = {
       visible: node.visible,
       disabled: node.disabled,
+      origin: node.origin,
     };
 
     if (node.label) content.label = node.label;
     if (node.parentId) content.parent_id = node.parentId;
     if (node.required) content.required = true;
+    if (node.context) content.context = node.context;
+    if (node.slot_for) content.slot_for = node.slot_for;
+    if (node.slotted_in) content.slotted_in = node.slotted_in;
 
     if (['heading', 'text', 'button', 'link', 'badge', 'notification', 'menu_item'].includes(type) && node.text) {
       content.text = node.text;
@@ -57,6 +61,37 @@ export class ContentExtractor {
     if (type === 'image') {
       content.src = node.attributes.src;
       content.alt = node.attributes.alt ?? node.label;
+    }
+
+    if (type === 'iframe' || type === 'embed') {
+      content.src = node.iframe?.src ?? node.attributes.src;
+      content.url = node.iframe?.url ?? node.attributes.src;
+      content.iframe_type = node.iframe?.iframe_type;
+      content.embed_type = node.iframe?.embed_type;
+      content.same_origin = node.iframe?.same_origin;
+      content.accessible = node.iframe?.accessible;
+      content.status = node.iframe?.status;
+      content.depth = node.iframe?.depth;
+      content.video_id = node.iframe?.video_id;
+      content.map_query = node.iframe?.map_query;
+      content.sandbox = node.iframe?.sandbox;
+      content.loading = node.iframe?.loading;
+      content.referrer_policy = node.iframe?.referrer_policy;
+      content.width = node.iframe?.width;
+      content.height = node.iframe?.height;
+      if (node.iframe?.iframe_type === 'payment') {
+        content.available_actions = [{ action: 'interact', description: 'Payment form requires secure user interaction' }];
+      } else if (node.iframe?.iframe_type === 'captcha') {
+        content.available_actions = [{ action: 'interact', description: 'CAPTCHA challenge requires user interaction' }];
+      } else if (node.iframe?.iframe_type === 'auth') {
+        content.available_actions = [{ action: 'interact', description: 'Authentication iframe requires sign-in flow' }];
+      } else if (node.iframe?.embed_type === 'youtube' || node.iframe?.embed_type === 'vimeo') {
+        content.available_actions = [{ action: 'interact', description: 'Embedded video player' }];
+      }
+    }
+
+    if (type === 'shadow_host') {
+      content.shadow = node.shadow;
     }
 
     if (type === 'heading') {

@@ -8,7 +8,10 @@ import {
   RuntimeEventStats,
   SemanticSnapshot,
   SessionState,
+  StreamEvent,
+  StreamEventType,
   TabState,
+  ViewportState,
 } from '../common/types';
 
 export type BrowserAction =
@@ -16,6 +19,7 @@ export type BrowserAction =
   | 'fill_form'
   | 'go_back'
   | 'hover'
+  | 'interact'
   | 'if'
   | 'invalidate_cache'
   | 'keyboard'
@@ -33,6 +37,7 @@ export type BrowserAction =
   | 'scroll_to_element'
   | 'select'
   | 'sequence'
+  | 'set_viewport'
   | 'snapshot'
   | 'submit'
   | 'switch_tab'
@@ -160,6 +165,13 @@ export interface RuntimeEventInfo {
   events: RuntimeEvent[];
 }
 
+export interface StreamSubscribeOptions {
+  events?: Array<StreamEventType | 'runtime' | '*' | 'all'>;
+  replay?: boolean;
+  since?: string;
+  limit?: number;
+}
+
 export interface Pagination<T> {
   data: T[];
   pagination: {
@@ -203,6 +215,7 @@ export interface SessionPack {
   page: {
     url: string;
     title: string;
+    viewport?: ViewportState;
   };
   snapshot?: SemanticSnapshot;
 }
@@ -211,6 +224,7 @@ export interface ImportSessionOptions {
   session_id?: string;
   navigate?: boolean;
   url?: string;
+  viewport?: ViewportState | string;
 }
 
 export interface ImportSessionResponse {
@@ -227,6 +241,10 @@ export interface ExecuteActionOptions {
   trace_id?: string;
 }
 
+export interface CreateSessionOptions {
+  viewport?: ViewportState | string;
+}
+
 export interface BrowserClientOptions {
   baseUrl?: string;
   timeoutMs?: number;
@@ -240,7 +258,7 @@ export interface CreateSessionResponse {
 }
 
 export interface BrowserClientContract {
-  createSession(): Promise<BrowserSessionContract>;
+  createSession(options?: CreateSessionOptions): Promise<BrowserSessionContract>;
   listSessions(): Promise<Pagination<SessionState>>;
   exportSession(sessionId: string): Promise<SessionPack>;
   importSession(pack: SessionPack, options?: ImportSessionOptions): Promise<BrowserSessionContract>;
@@ -272,7 +290,9 @@ export interface BrowserSessionContract {
   openTab(url?: string): Promise<CommandResult>;
   switchTab(tabId: string): Promise<CommandResult>;
   closeTab(tabId?: string): Promise<CommandResult>;
+  setViewport(viewport: ViewportState | string): Promise<CommandResult>;
   click(targetId: string): Promise<CommandResult>;
+  interact(targetId: string): Promise<CommandResult>;
   type(targetId: string, text: string, options?: Record<string, any>): Promise<CommandResult>;
   select(targetId: string, value: string): Promise<CommandResult>;
   submit(targetId: string): Promise<CommandResult>;
@@ -299,5 +319,8 @@ export type {
   RuntimeEventStats,
   SemanticSnapshot,
   SessionState,
+  StreamEvent,
+  StreamEventType,
   TabState,
+  ViewportState,
 };

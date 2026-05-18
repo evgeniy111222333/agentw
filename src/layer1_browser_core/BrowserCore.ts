@@ -1,12 +1,14 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { ConfigurationManager } from '../config/ConfigurationManager';
-import { RuntimeEvent, RuntimeEventKind, RuntimeEventStats, TabState } from '../common/types';
+import { RuntimeEvent, RuntimeEventKind, RuntimeEventStats, TabState, ViewportState } from '../common/types';
 import { Events } from '../obs/Events';
 import { LlmBrowserError } from '../common/errors';
+import { defaultView, normalizeView } from '../device/View';
 
 export interface CreateSessionOptions {
   storageState?: any;
   url?: string;
+  viewport?: unknown;
 }
 
 export class BrowserCore {
@@ -15,6 +17,7 @@ export class BrowserCore {
   private pages: Map<string, Map<string, Page>> = new Map();
   private activeTabs: Map<string, string> = new Map();
   private tabSeq: Map<string, number> = new Map();
+  private viewports: Map<string, ViewportState> = new Map();
   private events = new Events();
 
   async initialize(): Promise<void> {
@@ -31,15 +34,21 @@ export class BrowserCore {
     this.assertCapacity('session');
     
     const config = ConfigurationManager.getInstance().getConfig().browser;
+    const viewport = { ...normalizeView(options.viewport, defaultView(config)), mode: 'context' as const };
     const context = await this.browser.newContext({
-      viewport: config.viewport,
-      userAgent: config.user_agent,
+      viewport: { width: viewport.width, height: viewport.height },
+      deviceScaleFactor: viewport.device_scale_factor,
+      isMobile: viewport.is_mobile,
+      hasTouch: viewport.has_touch,
+      userAgent: viewport.user_agent ?? config.user_agent,
       ignoreHTTPSErrors: config.ignore_https_errors,
       storageState: options.storageState,
     });
+    await context.addInitScript(shadowDomHook);
     
     this.contexts.set(sessionId, context);
     this.pages.set(sessionId, new Map());
+    this.viewports.set(sessionId, viewport);
     const page = await context.newPage();
     this.registerPage(sessionId, page, 'tab-1');
     this.activeTabs.set(sessionId, 'tab-1');
@@ -61,6 +70,7 @@ export class BrowserCore {
       this.pages.delete(sessionId);
       this.activeTabs.delete(sessionId);
       this.tabSeq.delete(sessionId);
+      this.viewports.delete(sessionId);
       this.events.clear(sessionId);
     }
   }
@@ -90,6 +100,17 @@ export class BrowserCore {
 
   async storageState(sessionId: string): Promise<any> {
     return this.getContext(sessionId).storageState();
+  }
+
+  getViewport(sessionId: string, tabId?: string): ViewportState | undefined {
+    const page = this.pages.get(sessionId)?.get(tabId ?? this.activeTabs.get(sessionId) ?? '');
+    const size = page?.viewportSize();
+    const stored = this.viewports.get(sessionId);
+    if (!stored && !size) return undefined;
+    return {
+      ...(stored ?? {}),
+      ...(size ?? {}),
+    } as ViewportState;
   }
 
   stats(): Record<string, number | boolean> {
@@ -141,6 +162,7 @@ export class BrowserCore {
         url: page.url(),
         title: await page.title().catch(() => ''),
         active: tabId === active,
+        viewport: this.getViewport(sessionId, tabId),
       });
     }
     return result;
@@ -150,6 +172,8 @@ export class BrowserCore {
     const context = this.getContext(sessionId);
     this.assertCapacity('tab', sessionId);
     const page = await context.newPage();
+    const viewport = this.getViewport(sessionId);
+    if (viewport) await page.setViewportSize({ width: viewport.width, height: viewport.height }).catch(() => undefined);
     const tabId = this.registerPage(sessionId, page);
     this.activeTabs.set(sessionId, tabId);
     if (url) {
@@ -186,6 +210,18 @@ export class BrowserCore {
       closed_tab_id: targetTab,
       active_tab: await this.tabInfo(sessionId, this.getActiveTabId(sessionId)),
     };
+  }
+
+  async setViewport(sessionId: string, value: unknown): Promise<ViewportState> {
+    const base = this.getViewport(sessionId) ?? defaultView(ConfigurationManager.getInstance().getConfig().browser);
+    const viewport = { ...normalizeView(value, base), mode: 'page' as const };
+    const tabs = this.pages.get(sessionId);
+    if (!tabs) throw new Error(`Session ${sessionId} not found`);
+    for (const page of tabs.values()) {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    }
+    this.viewports.set(sessionId, viewport);
+    return viewport;
   }
 
   async close(): Promise<void> {
@@ -236,6 +272,7 @@ export class BrowserCore {
       url: page.url(),
       title: await page.title().catch(() => ''),
       active: tabId === this.getActiveTabId(sessionId),
+      viewport: this.getViewport(sessionId, tabId),
     };
   }
 
@@ -275,5 +312,33 @@ function memoryStats(): { rss_mb: number; heap_used_mb: number } {
   return {
     rss_mb: Math.round(memory.rss / 1024 / 1024),
     heap_used_mb: Math.round(memory.heapUsed / 1024 / 1024),
+  };
+}
+
+function shadowDomHook(): void {
+  const key = '__llmBrowserShadowRoots';
+  const win = window as any;
+  if (win[key]?.installed) return;
+
+  const original = Element.prototype.attachShadow;
+  const roots: Array<{ host: Element; root: ShadowRoot; mode: string }> = [];
+  Object.defineProperty(win, key, {
+    value: {
+      installed: true,
+      roots,
+      rootFor(host: Element) {
+        return roots.find((entry) => entry.host === host)?.root;
+      },
+      modeFor(host: Element) {
+        return roots.find((entry) => entry.host === host)?.mode;
+      },
+    },
+    configurable: false,
+  });
+
+  Element.prototype.attachShadow = function patchedAttachShadow(init: ShadowRootInit): ShadowRoot {
+    const root = original.call(this, init);
+    roots.push({ host: this, root, mode: init.mode });
+    return root;
   };
 }

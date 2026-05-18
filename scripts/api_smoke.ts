@@ -34,6 +34,13 @@ async function main() {
     if (!sessionId) throw new Error('create session response did not include session_id');
     const activeSessionId = sessionId;
 
+    const viewport = await restAction(baseUrl, activeSessionId, {
+      action: 'set_viewport',
+      params: {
+        profile: 'mobile',
+      },
+    });
+
     const navigate = await rpc(baseUrl, 'navigate', {
       session_id: activeSessionId,
       action_params: {
@@ -220,6 +227,9 @@ async function main() {
     ]);
 
     const wsSnapshot = await wsRpc(activeSessionId, 'snapshot', {});
+    const wsStream = await wsStreamProbe(activeSessionId, () =>
+      restAction(baseUrl, activeSessionId, { action: 'snapshot', params: { max_elements: 50 } })
+    );
 
     const exportResponse = await fetch(`${baseUrl}/api/v2/sessions/${activeSessionId}/export`);
     assertOk(exportResponse, 'export session');
@@ -315,6 +325,13 @@ async function main() {
         closed: closedTab.data?.closed_tab_id,
         final_count: tabsFinal.tabs.length,
       },
+      viewport: {
+        status: viewport.status,
+        width: viewport.data?.viewport?.width,
+        height: viewport.data?.viewport?.height,
+        profile: viewport.data?.viewport?.profile,
+        snapshot_width: viewport.snapshot.meta?.viewport?.width,
+      },
       rest_type: summarizeRpc(restType),
       fill_form: summarizeRpc(fillForm),
       search: {
@@ -355,6 +372,7 @@ async function main() {
       },
       batch_results: batch.length,
       ws_snapshot_elements: wsSnapshot.result.snapshot.elements.length,
+      ws_stream: wsStream,
       session_pack: {
         version: sessionPack.version,
         actions: sessionPack.actions.length,
@@ -530,6 +548,59 @@ async function wsRpc(sessionId: string, method: string, params: Record<string, a
       } else {
         resolve(message);
       }
+    });
+
+    socket.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+async function wsStreamProbe(sessionId: string, trigger: () => Promise<unknown>) {
+  return new Promise<any>((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?session_id=${sessionId}`);
+    const seen: string[] = [];
+    let triggered = false;
+    const timer = setTimeout(() => {
+      socket.close();
+      reject(new Error(`WebSocket stream timed out; seen=${seen.join(',')}`));
+    }, 5000);
+
+    const finish = () => {
+      clearTimeout(timer);
+      socket.close();
+      resolve({
+        events: seen,
+        page_changed: seen.includes('page_changed'),
+        action_completed: seen.includes('action_completed'),
+      });
+    };
+
+    socket.on('message', (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.type === 'connected') return;
+      if (message.type === 'subscribed' && !triggered) {
+        triggered = true;
+        void trigger().catch((error) => {
+          clearTimeout(timer);
+          socket.close();
+          reject(error);
+        });
+        return;
+      }
+      if (['page_changed', 'action_completed'].includes(message.type)) {
+        seen.push(message.type);
+        if (seen.includes('page_changed') && seen.includes('action_completed')) finish();
+      }
+    });
+
+    socket.on('open', () => {
+      socket.send(JSON.stringify({
+        type: 'subscribe',
+        events: ['page_changed', 'action_completed'],
+        id: 'stream-subscribe',
+      }));
     });
 
     socket.on('error', (error) => {

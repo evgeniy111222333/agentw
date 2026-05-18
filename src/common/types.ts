@@ -2,7 +2,7 @@ export type ElementType =
   | 'heading' | 'text' | 'link' | 'button' | 'input' | 'select' | 'form'
   | 'table' | 'list' | 'image' | 'navigation' | 'article' | 'card' | 'pagination'
   | 'modal' | 'tab_group' | 'accordion' | 'notification' | 'video' | 'breadcrumb'
-  | 'progress' | 'chart' | 'iframe' | 'dialog' | 'menu' | 'menu_item' | 'badge'
+  | 'progress' | 'chart' | 'iframe' | 'embed' | 'shadow_host' | 'dialog' | 'menu' | 'menu_item' | 'badge'
   | 'tooltip' | 'separator' | 'carousel' | 'rating' | 'stepper' | 'skeleton';
 
 export interface SemanticElement {
@@ -50,6 +50,7 @@ export interface SessionInfo {
   tabs_count: number;
   history_length: number;
   cookies_count: number;
+  viewport?: ViewportState;
 }
 
 export interface TabState {
@@ -57,8 +58,20 @@ export interface TabState {
   url: string;
   title: string;
   active: boolean;
+  viewport?: ViewportState;
   snapshot_id?: string;
   form_states?: any;
+}
+
+export interface ViewportState {
+  width: number;
+  height: number;
+  device_scale_factor?: number;
+  is_mobile?: boolean;
+  has_touch?: boolean;
+  user_agent?: string;
+  profile?: string;
+  mode?: 'context' | 'page';
 }
 
 export interface SnapshotMeta {
@@ -81,6 +94,16 @@ export interface SnapshotMeta {
   cache_entries?: number;
   incomplete?: boolean;
   trace_id?: string;
+  viewport?: ViewportState;
+  encapsulation?: {
+    iframe_count: number;
+    iframe_extracted_count: number;
+    iframe_skipped_ads: number;
+    iframe_depth_limited: number;
+    shadow_root_count: number;
+    closed_shadow_roots: number;
+    max_frame_depth: number;
+  };
   plugin_contributions?: {
     actions: number;
     elements: number;
@@ -171,7 +194,24 @@ export interface AuthState {
   updated_at: string;
 }
 
-export type RuntimeEventKind = 'request' | 'response' | 'request_failed' | 'console' | 'page_error';
+export type RuntimeEventKind =
+  | 'request'
+  | 'response'
+  | 'request_failed'
+  | 'console'
+  | 'page_error'
+  | 'navigation'
+  | 'dialog'
+  | 'download';
+
+export type StreamEventType =
+  | RuntimeEventKind
+  | 'runtime_event'
+  | 'page_changed'
+  | 'action_completed'
+  | 'error'
+  | 'security'
+  | 'heartbeat';
 
 export interface RuntimeEvent {
   event_id: string;
@@ -189,6 +229,12 @@ export interface RuntimeEvent {
   duration_ms?: number;
   level?: string;
   text?: string;
+  title?: string;
+  dialog_type?: string;
+  default_value?: string;
+  handled?: string;
+  file_name?: string;
+  page_url?: string;
   location?: {
     url?: string;
     line?: number;
@@ -203,6 +249,15 @@ export interface RuntimeEventStats {
   recent_errors: number;
 }
 
+export interface StreamEvent {
+  event_id: string;
+  type: StreamEventType;
+  timestamp: string;
+  session_id?: string;
+  tab_id?: string;
+  data?: Record<string, any>;
+}
+
 export interface SessionState {
   session_id: string;
   created_at: string;
@@ -214,6 +269,7 @@ export interface SessionState {
   localStorage: Record<string, string>;
   history: Array<{ url: string; timestamp: string; navigation_type?: string; referrer?: string }>;
   configuration: any;
+  viewport?: ViewportState;
   auth?: AuthState;
 }
 

@@ -125,6 +125,31 @@ REST endpoint:
 
 - `GET /api/v2/sessions/:id/snapshot?max_elements=500`
 
+## Encapsulation
+
+Semantic extraction crosses browser encapsulation boundaries with explicit context. Same-origin iframes are traversed up to `LLM_BROWSER_MAX_FRAME_DEPTH` and their children keep `origin: "iframe:..."` plus frame context. Cross-origin payment, CAPTCHA, auth, and media embeds are represented as metadata-only `iframe` or `embed` elements; ad iframes are filtered before they reach the snapshot. Open Shadow DOM and captured closed Shadow DOM are traversed with `origin: "shadow:<host_id>"`, `shadow_host` elements, and slot links via `slot_for` / `slotted_in`.
+
+`snapshot.meta.encapsulation` reports iframe/shadow counts, extracted frames, skipped ads, depth limits, and closed shadow roots. Actions resolve targets across same-origin frames and open/captured shadow trees, so IDs returned in the semantic snapshot remain executable.
+
+## Responsive Viewports
+
+Sessions can start with a viewport profile, and agents can resize the active session at runtime. The runtime ships with `desktop`, `tablet`, and `mobile` profiles, records viewport state in `session.viewport`, `tab.viewport`, and `snapshot.meta.viewport`, and includes viewport in the semantic cache key so mobile and desktop snapshots do not collide.
+
+```ts
+const mobile = await client.createSession({ viewport: 'mobile' });
+await mobile.setViewport({ width: 390, height: 844 });
+const mobileSnapshot = await mobile.snapshot();
+```
+
+```py
+session = client.create_session(viewport="mobile")
+session.set_viewport({"width": 390, "height": 844})
+```
+
+Core action:
+
+- `set_viewport` with `{ profile: "mobile" }` or `{ width: 390, height: 844 }`
+
 ## Tabs
 
 Sessions can hold multiple isolated pages in one browser context. The active tab is reflected in `snapshot.session.tab_id`, and deltas are tracked per tab so snapshots from different tabs are not compared to each other.
@@ -146,17 +171,28 @@ REST endpoints:
 
 ## Events
 
-Each page records a bounded stream of runtime events: network requests, responses, request failures, console messages, and page errors. Event URLs redact sensitive query values such as tokens, secrets, passwords, auth codes, and session IDs. Request/response bodies and headers are not emitted.
+Each page records a bounded stream of runtime events: network requests, responses, request failures, console messages, page errors, navigation, dialogs, and downloads. Event URLs redact sensitive query values such as tokens, secrets, passwords, auth codes, and session IDs. Request/response bodies and headers are not emitted.
 
 ```ts
 const events = await session.events({ kind: 'console', limit: 20 });
 await session.clearEvents();
 ```
 
+WebSocket clients can subscribe to live stream events instead of polling. Supported stream types include runtime kinds plus `page_changed`, `action_completed`, `error`, and `heartbeat`.
+
+```ts
+const socket = session.socket();
+socket.onEvent((event) => console.log(event.type, event.data));
+await socket.subscribe({ events: ['page_changed', 'action_completed'], replay: true });
+await session.snapshot();
+socket.close();
+```
+
 REST endpoints:
 
 - `GET /api/v2/sessions/:id/events`
 - `DELETE /api/v2/sessions/:id/events`
+- `WS /api/v2/ws?session_id=...` with `subscribe`, `unsubscribe`, `replay`, and `ping`
 
 ## File Actions
 
