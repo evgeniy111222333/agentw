@@ -444,6 +444,9 @@ export class CommandRouter {
 
       await this.syncTabs(command.session_id);
       const page = this.browserCore.getPage(command.session_id);
+      if (typeof (this.stateManager as any).injectAllTrackers === 'function') {
+        await this.stateManager.injectAllTrackers(page, command.session_id).catch(() => undefined);
+      }
       const active = activeTab(this.stateManager.getSessionState(command.session_id));
       let previousSnapshot = active ? this.previousSnapshots.get(snapKey(command.session_id, active.tab_id)) : undefined;
 

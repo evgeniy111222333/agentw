@@ -70,6 +70,16 @@ async function main() {
         max_elements: first.meta?.max_elements,
         semantic_nodes_total: first.meta?.semantic_nodes_total,
         encapsulation: first.meta?.encapsulation,
+        scroll: first.meta?.scroll,
+        form_state: first.forms?.[0]
+          ? {
+              is_dirty: first.forms[0].is_dirty,
+              is_valid: first.forms[0].is_valid,
+              completion_percentage: first.forms[0].completion_percentage,
+              errors: first.forms[0].errors?.length ?? 0,
+              field_count: Object.keys(first.forms[0].field_values ?? {}).length,
+            }
+          : undefined,
         privacy: first.meta?.privacy,
         plugin_contributions: first.meta?.plugin_contributions,
         sam_actions: first.available_actions.filter((action) => action.source?.standard === 'SAM').length,

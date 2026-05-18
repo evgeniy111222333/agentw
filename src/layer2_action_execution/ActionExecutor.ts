@@ -278,11 +278,16 @@ export class ActionExecutor {
 
       case 'scroll':
       case 'scroll_to_element': {
+        if (params.mode === 'auto_scroll') {
+          return this.autoScroll(page, params);
+        }
         const amount = Number(params.amount ?? 720);
-        const direction = params.direction === 'up' ? -1 : 1;
+        const direction = params.direction === 'up' || params.direction === 'left' ? -1 : 1;
         if (targetId) {
           const locator = await this.locatorForAny(page, targetId);
           await locator.scrollIntoViewIfNeeded({ timeout: params.timeout_ms ?? 5000 });
+        } else if (params.direction === 'left' || params.direction === 'right') {
+          await page.mouse.wheel(amount * direction, 0);
         } else {
           await page.mouse.wheel(0, amount * direction);
         }
@@ -1755,18 +1760,65 @@ export class ActionExecutor {
   private async scrollState(page: Page): Promise<Record<string, any>> {
     return page.evaluate(() => {
       const totalHeight = document.documentElement.scrollHeight;
+      const totalWidth = document.documentElement.scrollWidth;
       const viewportHeight = window.innerHeight;
+      const viewportWidth = window.innerWidth;
       const maxScroll = Math.max(1, totalHeight - viewportHeight);
+      const maxScrollX = Math.max(1, totalWidth - viewportWidth);
 
       return {
         scroll: {
-          position: window.scrollY,
+          position: Math.round(window.scrollY),
+          left: Math.round(window.scrollX),
           viewport_height: viewportHeight,
+          viewport_width: viewportWidth,
           total_height: totalHeight,
+          total_width: totalWidth,
           percentage: Number((window.scrollY / maxScroll).toFixed(4)),
+          horizontal_percentage: Number((window.scrollX / maxScrollX).toFixed(4)),
         },
       };
     });
+  }
+
+  private async autoScroll(page: Page, params: any): Promise<Record<string, any>> {
+    const maxItems = Math.max(1, Number(params.max_items ?? 100));
+    const stallTimeoutMs = Math.max(500, Number(params.stall_timeout_ms ?? 5000));
+    const step = Number(params.amount ?? 900);
+    const started = Date.now();
+    let iterations = 0;
+    let lastHeight = 0;
+    let lastCount = 0;
+    let stableSince = Date.now();
+
+    while (iterations < maxItems && Date.now() - started < Math.max(stallTimeoutMs * 4, 10000)) {
+      const state = await page.evaluate(() => ({
+        height: document.documentElement.scrollHeight,
+        count: document.querySelectorAll('a, button, input, select, textarea, article, li, [data-llm-browser-id]').length,
+        bottom: window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4,
+      }));
+      if (state.height !== lastHeight || state.count !== lastCount) {
+        lastHeight = state.height;
+        lastCount = state.count;
+        stableSince = Date.now();
+      } else if (state.bottom && Date.now() - stableSince >= stallTimeoutMs) {
+        break;
+      }
+      await page.mouse.wheel(0, step);
+      await page.waitForTimeout(Number(params.delay_ms ?? 250));
+      iterations += 1;
+    }
+
+    const scroll = await this.scrollState(page);
+    return {
+      ...scroll,
+      auto_scroll: {
+        iterations,
+        observed_items: lastCount,
+        stall_timeout_ms: stallTimeoutMs,
+        duration_ms: Date.now() - started,
+      },
+    };
   }
 }
 

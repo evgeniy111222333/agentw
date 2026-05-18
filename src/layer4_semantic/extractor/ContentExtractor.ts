@@ -47,6 +47,8 @@ export class ContentExtractor {
     if (type === 'modal' || type === 'dialog' || type === 'menu' || type === 'badge' || type === 'tooltip') this.extractComponent(node, content);
 
     if (node.boundingBox?.in_viewport === false) content.in_viewport = false;
+    if (node.boundingBox?.visible_ratio !== undefined) content.visible_ratio = node.boundingBox.visible_ratio;
+    if (node.lazy) content.lazy = node.lazy;
 
     return dropUndefined(content);
   }
@@ -107,6 +109,11 @@ export class ContentExtractor {
     content.action = node.form?.action;
     content.method = node.form?.method ?? 'GET';
     content.fields = node.form?.fields ?? [];
+    content.field_values = node.form?.field_values;
+    content.errors = node.form?.errors ?? [];
+    content.is_dirty = node.form?.is_dirty;
+    content.is_valid = node.form?.is_valid;
+    content.completion_percentage = node.form?.completion_percentage;
     content.submit_button_id = node.form?.submit_button_id;
     content.enctype = node.form?.enctype;
     content.autocomplete = node.form?.autocomplete;

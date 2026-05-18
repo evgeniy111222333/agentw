@@ -61,7 +61,35 @@ export interface TabState {
   active: boolean;
   viewport?: ViewportState;
   snapshot_id?: string;
-  form_states?: any;
+  form_states?: Record<string, FormState>;
+}
+
+export interface FormState {
+  form_id: string;
+  fields: Record<string, any>;
+  errors: string[];
+  is_dirty: boolean;
+  is_valid: boolean;
+  completion_percentage: number;
+  updated_at?: string;
+}
+
+export interface ScrollState {
+  position: number;
+  left: number;
+  viewport_height: number;
+  viewport_width: number;
+  total_height: number;
+  total_width: number;
+  percentage: number;
+  horizontal_percentage: number;
+  lazy_count?: number;
+  lazy_unloaded_count?: number;
+  infinite_scroll?: {
+    detected: boolean;
+    sentinel_id?: string;
+    reason?: string;
+  };
 }
 
 export interface ViewportState {
@@ -98,6 +126,7 @@ export interface SnapshotMeta {
   incomplete?: boolean;
   trace_id?: string;
   viewport?: ViewportState;
+  scroll?: ScrollState;
   encapsulation?: {
     iframe_count: number;
     iframe_in_output_count?: number;
@@ -292,6 +321,12 @@ export interface SessionState {
   configuration: any;
   viewport?: ViewportState;
   auth?: AuthState;
+  form_states?: Record<string, FormState>;
+  checkpoint?: {
+    last_checkpoint_at?: string;
+    checkpoint_path?: string;
+    checkpoint_reason?: string;
+  };
 }
 
 export interface ActionRecord {

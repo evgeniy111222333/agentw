@@ -8,6 +8,7 @@ import { ConfigurationManager } from '../config/ConfigurationManager';
 import { SemanticLayer } from '../layer4_semantic/SemanticLayer';
 import { SemanticSnapshot, ViewportState } from '../common/types';
 import { globalMetrics } from '../common/MetricsRegistry';
+import { globalEventBus } from '../common/EventBus';
 import { LlmBrowserError, normalizeError } from '../common/errors';
 import { CommandRouter } from './CommandRouter';
 import { WebSocketGateway } from './WebSocketGateway';
@@ -125,7 +126,7 @@ export class ApiServer {
         this.stateManager.registerSession(sessionId, { viewport: this.browserCore.getViewport(sessionId) });
 
         const page = this.browserCore.getPage(sessionId);
-        await this.stateManager.injectMutationObserver(page, sessionId);
+        await this.stateManager.injectAllTrackers(page, sessionId);
         globalMetrics.increment('llm_browser_sessions_created_total');
 
         res.status(201).json({ session_id: sessionId });
@@ -151,12 +152,13 @@ export class ApiServer {
           ...restoredSession,
           viewport: this.browserCore.getViewport(sessionId),
         });
+        if (pack.form_states) this.stateManager.setFormStates(sessionId, pack.form_states);
         this.stateManager.setActionHistory(sessionId, importedActions(pack, sessionId));
         const snapshot = importedSnapshot(pack, sessionId);
         if (snapshot) this.previousSnapshots.set(snapKey(sessionId, snapshot.session.tab_id), snapshot);
 
         const page = this.browserCore.getPage(sessionId);
-        await this.stateManager.injectMutationObserver(page, sessionId);
+        await this.stateManager.injectAllTrackers(page, sessionId);
         const targetUrl = String(req.body?.url ?? pack.page.url ?? pack.session.current_url ?? '');
         if (targetUrl && req.body?.navigate !== false) {
           await page.goto(targetUrl, { waitUntil: 'load' });
@@ -204,6 +206,8 @@ export class ApiServer {
             viewport: this.browserCore.getViewport(req.params.id),
           },
           snapshot: this.activeSnapshot(req.params.id),
+          formStates: this.stateManager.getFormStates(req.params.id),
+          eventBus: globalEventBus.snapshot({ session_id: req.params.id, limit: 500 }),
         });
         globalMetrics.increment('llm_browser_sessions_exported_total');
         res.json(pack);

@@ -42,13 +42,21 @@ export class IncrementalUpdater {
     const snapshot = this.activeSnapshots.get(session_id);
     if (!snapshot) return;
 
+    if (data.form_id && data.fields) {
+      snapshot.forms = (snapshot.forms ?? []).filter((form) => form.form_id !== data.form_id);
+      snapshot.forms.push(data);
+      for (const [field, value] of Object.entries(data.fields)) {
+        const el = snapshot.elements.find(e => e.id === field || e.name === field);
+        if (el) el.value = value;
+      }
+      snapshot.timestamp = new Date().toISOString();
+      this.activeSnapshots.set(session_id, snapshot);
+      return;
+    }
+
     const el = snapshot.elements.find(e => e.id === data.elementId);
     if (el) {
-      if (data.type === 'checkbox' || data.type === 'radio') {
-        el.value = data.value;
-      } else {
-        el.value = data.value;
-      }
+      el.value = data.value;
       snapshot.timestamp = new Date().toISOString();
       this.activeSnapshots.set(session_id, snapshot);
     }
@@ -64,22 +72,27 @@ export class IncrementalUpdater {
 
     for (const mutation of mutations) {
       if (mutation.type === 'childList') {
-        if (mutation.target && typeof mutation.target === 'string') {
+        const target = mutation.target_id ?? mutation.target;
+        if (target && typeof target === 'string') {
           try {
              if (this.traverser.traverseNode) {
-               const newNodes = await this.traverser.traverseNode(page, mutation.target);
+               const newNodes = await this.traverser.traverseNode(page, target);
                const newElements = newNodes.nodes.map(node => {
-                  const type = this.classifier.classify(node);
+                  const classification = typeof this.classifier.classifyDetailed === 'function'
+                    ? this.classifier.classifyDetailed(node)
+                    : { type: this.classifier.classify(node), confidence: 1, level: 'tag', signals: [] };
+                  const type = classification.type;
                   const content = this.extractor.extract(node, type);
                   return {
                     id: node.id,
                     type,
                     role: node.role,
+                    classification,
                     ...content,
                   } as SemanticElement;
                });
                
-               snapshot.elements = snapshot.elements.filter(e => e.parent_id !== mutation.target);
+               snapshot.elements = snapshot.elements.filter(e => e.parent_id !== target);
                snapshot.elements.push(...newElements);
                modified = true;
              }

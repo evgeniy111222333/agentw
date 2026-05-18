@@ -181,7 +181,7 @@ export class ActionDiscovery {
         action_id: 'scroll_down',
         action: 'scroll',
         label: 'Scroll down',
-        params: { direction: 'down', amount: 720 },
+        params: { direction: 'down', amount: 720, schema: { direction: 'up|down|left|right?', amount: 'number?', mode: 'auto_scroll?', max_items: 'number?', stall_timeout_ms: 'number?' } },
         risk: 'low',
       },
       {

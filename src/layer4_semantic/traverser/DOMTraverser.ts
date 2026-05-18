@@ -1,4 +1,5 @@
 import { Frame, Page } from 'playwright';
+import { ScrollState } from '../../common/types';
 import { ConfigurationManager } from '../../config/ConfigurationManager';
 
 export interface TraversedNode {
@@ -58,12 +59,24 @@ export interface TraversedNode {
     width: number;
     height: number;
     in_viewport: boolean;
+    visible_ratio?: number;
+  };
+  lazy?: {
+    lazy: boolean;
+    loaded: boolean;
+    trigger: 'scroll_into_view' | 'native_lazy' | 'unknown';
+    reason: string[];
   };
   options?: Array<{ value: string; label: string; selected: boolean; disabled: boolean; optgroup?: string }>;
   form?: {
     action?: string;
     method?: string;
     fields: string[];
+    field_values?: Record<string, any>;
+    errors?: string[];
+    is_dirty?: boolean;
+    is_valid?: boolean;
+    completion_percentage?: number;
     submit_button_id?: string;
     enctype?: string;
     autocomplete?: string;
@@ -184,6 +197,7 @@ export interface TraversalResult {
     shadow_root_count: number;
     closed_shadow_roots: number;
     max_frame_depth: number;
+    scroll?: ScrollState;
   };
 }
 
@@ -343,6 +357,7 @@ function mergeResults(results: TraversalResult[], frameDescriptors: FrameDescrip
     shadow_root_count: total.shadow_root_count + result.stats.shadow_root_count,
     closed_shadow_roots: total.closed_shadow_roots + result.stats.closed_shadow_roots,
     max_frame_depth: Math.max(total.max_frame_depth, result.stats.max_frame_depth),
+    scroll: total.scroll,
   }), {
     dom_nodes_count: 0,
     semantic_nodes_count: 0,
@@ -361,6 +376,7 @@ function mergeResults(results: TraversalResult[], frameDescriptors: FrameDescrip
     shadow_root_count: 0,
     closed_shadow_roots: 0,
     max_frame_depth: 0,
+    scroll: first?.stats.scroll ?? emptyScrollState(),
   });
 
   stats.iframe_count = Math.max(stats.iframe_count, frameDescriptors.length);
@@ -369,6 +385,19 @@ function mergeResults(results: TraversalResult[], frameDescriptors: FrameDescrip
   return {
     nodes,
     stats,
+  };
+}
+
+function emptyScrollState(): ScrollState {
+  return {
+    position: 0,
+    left: 0,
+    viewport_height: 0,
+    viewport_width: 0,
+    total_height: 0,
+    total_width: 0,
+    percentage: 0,
+    horizontal_percentage: 0,
   };
 }
 
@@ -607,18 +636,65 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
   };
   const extractForm = (el: HTMLElement, ensureId: (el: HTMLElement) => string) => {
     if (!(el instanceof HTMLFormElement)) return undefined;
-    const fields = Array.from(el.querySelectorAll('input, select, textarea'))
-      .filter((field): field is HTMLElement => field instanceof HTMLElement)
-      .map((field) => ensureId(field));
+    const controls = Array.from(el.querySelectorAll('input, select, textarea'))
+      .filter((field): field is HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement =>
+        field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement
+      );
+    const fields = controls.map((field) => ensureId(field));
+    const fieldValues: Record<string, any> = {};
+    const errors: string[] = [];
+    let required = 0;
+    let completed = 0;
+    let dirty = false;
+    for (const field of controls) {
+      const key = field.name || field.id || ensureId(field);
+      const value = formControlValue(field);
+      fieldValues[key] = maskFormValue(field, value);
+      if (field.required) {
+        required += 1;
+        if (field instanceof HTMLInputElement && ['checkbox', 'radio'].includes(field.type)) {
+          if (field.checked) completed += 1;
+        } else if (String(value ?? '').trim()) {
+          completed += 1;
+        }
+      }
+      const initial = field.getAttribute('data-llm-initial-value');
+      if (initial !== null && String(value) !== initial) dirty = true;
+      if (!field.validity.valid && field.validationMessage) errors.push(`${key}: ${field.validationMessage}`);
+      if (field.getAttribute('aria-invalid') === 'true') errors.push(`${key}: invalid`);
+      const visualError = field.closest('.error, .invalid, [aria-invalid="true"]') ||
+        field.parentElement?.querySelector('.error, .invalid, .field-error, [role="alert"]');
+      if (visualError instanceof HTMLElement) {
+        const message = normalizeText(visualError.textContent, 180);
+        if (message) errors.push(`${key}: ${message}`);
+      }
+    }
     const submit = el.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
     return {
       action: el.getAttribute('action') ?? undefined,
       method: (el.getAttribute('method') ?? 'GET').toUpperCase(),
       fields,
+      field_values: fieldValues,
+      errors: Array.from(new Set(errors)).slice(0, 20),
+      is_dirty: dirty,
+      is_valid: errors.length === 0 && controls.every((field) => field.validity.valid),
+      completion_percentage: required > 0 ? Math.round((completed / required) * 100) : 100,
       submit_button_id: submit instanceof HTMLElement ? ensureId(submit) : undefined,
       enctype: el.getAttribute('enctype') ?? undefined,
       autocomplete: el.getAttribute('autocomplete') ?? undefined,
     };
+  };
+  const formControlValue = (field: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): any => {
+    if (field instanceof HTMLInputElement && field.type === 'checkbox') return field.checked;
+    if (field instanceof HTMLInputElement && field.type === 'radio') return field.checked ? field.value : false;
+    if (field instanceof HTMLSelectElement && field.multiple) {
+      return Array.from(field.selectedOptions).map((option) => option.value);
+    }
+    return field.value;
+  };
+  const maskFormValue = (field: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement, value: any): any => {
+    if (field instanceof HTMLInputElement && ['password', 'hidden'].includes(field.type)) return value ? '[masked]' : value;
+    return value;
   };
   const extractTable = (el: HTMLElement, normalize: (value: string | null | undefined, limit: number) => string | undefined) => {
     if (!(el instanceof HTMLTableElement)) return undefined;
@@ -1084,6 +1160,62 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     if (media.icon && !el.closest('button, a, [role="button"]')) return true;
     return false;
   };
+  const visibleRatio = (rect: DOMRect): number => {
+    const area = Math.max(1, rect.width * rect.height);
+    const x1 = Math.max(0, rect.left);
+    const y1 = Math.max(0, rect.top);
+    const x2 = Math.min(window.innerWidth, rect.right);
+    const y2 = Math.min(window.innerHeight, rect.bottom);
+    const visibleWidth = Math.max(0, x2 - x1);
+    const visibleHeight = Math.max(0, y2 - y1);
+    return Number(((visibleWidth * visibleHeight) / area).toFixed(4));
+  };
+  const lazyInfo = (el: HTMLElement, tagName: string, rect: DOMRect): TraversedNode['lazy'] | undefined => {
+    const reasons: string[] = [];
+    const hasDataSrc = el.hasAttribute('data-src') || el.hasAttribute('data-srcset') || el.hasAttribute('data-lazy-src');
+    const nativeLazy = el.getAttribute('loading') === 'lazy';
+    const placeholder = /\b(lazy|placeholder|blur|skeleton|unloaded)\b/i.test(`${el.className} ${el.getAttribute('src') ?? ''}`);
+    const emptyBelowFold = rect.top > window.innerHeight && !normalizeText(el.textContent, 60) && el.childElementCount === 0;
+    if (hasDataSrc) reasons.push('data_src');
+    if (nativeLazy) reasons.push('native_loading_lazy');
+    if (placeholder) reasons.push('placeholder');
+    if (emptyBelowFold) reasons.push('empty_below_fold');
+    if (reasons.length === 0) return undefined;
+    const src = el.getAttribute('src') || '';
+    return {
+      lazy: true,
+      loaded: Boolean(src && !hasDataSrc && !placeholder),
+      trigger: nativeLazy ? 'native_lazy' : 'scroll_into_view',
+      reason: reasons,
+    };
+  };
+  const scrollState = (lazyNodes: TraversedNode[]): ScrollState => {
+    const totalHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0, window.innerHeight);
+    const totalWidth = Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth ?? 0, window.innerWidth);
+    const maxScrollY = Math.max(1, totalHeight - window.innerHeight);
+    const maxScrollX = Math.max(1, totalWidth - window.innerWidth);
+    const sentinel = document.querySelector('[data-infinite-scroll], [data-testid*="sentinel"], .infinite-scroll-sentinel, .load-more-sentinel, [class*="sentinel"]') as HTMLElement | null;
+    const hasPagination = Boolean(document.querySelector('[class*="pagination"], [aria-label*="pagination" i], nav[aria-label*="page" i]'));
+    return {
+      position: Math.round(window.scrollY),
+      left: Math.round(window.scrollX),
+      viewport_height: window.innerHeight,
+      viewport_width: window.innerWidth,
+      total_height: totalHeight,
+      total_width: totalWidth,
+      percentage: Number((window.scrollY / maxScrollY).toFixed(4)),
+      horizontal_percentage: Number((window.scrollX / maxScrollX).toFixed(4)),
+      lazy_count: lazyNodes.length,
+      lazy_unloaded_count: lazyNodes.filter((node) => node.lazy?.loaded === false).length,
+      infinite_scroll: sentinel || (!hasPagination && totalHeight > window.innerHeight * 2)
+        ? {
+            detected: true,
+            sentinel_id: sentinel ? getSemanticId(sentinel) : undefined,
+            reason: sentinel ? 'sentinel' : 'long_page_without_pagination',
+          }
+        : { detected: false },
+    };
+  };
   const extractComponent = (
     el: HTMLElement,
     tagName: string,
@@ -1472,6 +1604,7 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
   let semanticCandidates = 0;
   let iframeCount = 0;
   let iframeSkippedAds = 0;
+  const lazyNodes: TraversedNode[] = [];
 
   for (const entry of entries) {
     const { el, context: entryContext } = entry;
@@ -1497,6 +1630,7 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
 
     const inViewport = rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth;
     if (!inViewport) belowFoldCount += 1;
+    const ratio = visibleRatio(rect);
 
     const role = el.getAttribute('role');
     const textSource = ['input', 'select', 'textarea'].includes(tagName)
@@ -1505,6 +1639,7 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     const label = accessibleLabel(el) ?? textSource;
     const shadow = shadowHosts.get(el);
     const media = extractMedia(el, tagName, rect, style, textSource, label);
+    const lazy = lazyInfo(el, tagName, rect);
     if (mediaIsNoise(media, el)) {
       skippedNoise += 1;
       continue;
@@ -1548,7 +1683,7 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
         el instanceof HTMLOptionElement) &&
       el.disabled;
 
-    nodes.push(localDropUndefined({
+    const node = localDropUndefined({
       id,
       _hash,
       tagName,
@@ -1588,7 +1723,9 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
         width: Math.round(rect.width),
         height: Math.round(rect.height),
         in_viewport: inViewport,
+        visible_ratio: ratio,
       },
+      lazy,
       options: extractSelectOptions(el, normalizeText),
       form: extractForm(el, getSemanticId),
       table: extractTable(el, normalizeText),
@@ -1597,7 +1734,9 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
       computed: computedInfo(style),
       media,
       component,
-    }));
+    });
+    if (node.lazy) lazyNodes.push(node);
+    nodes.push(node);
   }
 
   // Prioritize iframe and shadow_host nodes so they survive the maxElements cap
@@ -1630,6 +1769,7 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
       shadow_root_count: shadowHosts.size,
       closed_shadow_roots: Array.from(shadowHosts.values()).filter((shadow) => shadow.mode === 'closed').length,
       max_frame_depth: Number(rootContext.frameDepth ?? 0),
+      scroll: scrollState(lazyNodes),
     },
   };
 

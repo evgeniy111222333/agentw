@@ -1,4 +1,5 @@
-import { ActionRecord, SemanticSnapshot, SessionState, ViewportState } from '../common/types';
+import { EventBusSnapshot } from '../common/EventBus';
+import { ActionRecord, FormState, SemanticSnapshot, SessionState, ViewportState } from '../common/types';
 
 export const SESSION_PACK_VERSION = 'session-pack/1.0';
 
@@ -16,6 +17,8 @@ export interface SessionPack {
     viewport?: ViewportState;
   };
   snapshot?: SemanticSnapshot;
+  form_states?: Record<string, FormState>;
+  event_bus?: EventBusSnapshot;
 }
 
 export function makePack(input: {
@@ -24,6 +27,8 @@ export function makePack(input: {
   storageState: Record<string, any>;
   page: { url: string; title: string; viewport?: ViewportState };
   snapshot?: SemanticSnapshot;
+  formStates?: Record<string, FormState>;
+  eventBus?: EventBusSnapshot;
 }): SessionPack {
   return {
     version: SESSION_PACK_VERSION,
@@ -35,6 +40,8 @@ export function makePack(input: {
     },
     page: clone(input.page),
     snapshot: input.snapshot ? clone(input.snapshot) : undefined,
+    form_states: clone(input.formStates ?? input.session.form_states ?? {}),
+    event_bus: input.eventBus ? clone(input.eventBus) : undefined,
   };
 }
 
@@ -61,6 +68,8 @@ export function readPack(raw: any): SessionPack {
       viewport: pack.page?.viewport ? clone(pack.page.viewport) : pack.session.viewport ? clone(pack.session.viewport) : undefined,
     },
     snapshot: pack.snapshot ? clone(pack.snapshot) : undefined,
+    form_states: pack.form_states ? clone(pack.form_states) : pack.session.form_states ? clone(pack.session.form_states) : undefined,
+    event_bus: pack.event_bus ? clone(pack.event_bus) : undefined,
   };
 }
 
@@ -78,6 +87,7 @@ export function importedSession(pack: SessionPack, sessionId: string): SessionSt
       imported_from_session_id: pack.session.session_id,
       imported_at: now,
     },
+    form_states: clone(pack.form_states ?? pack.session.form_states ?? {}),
     updated_at: now,
   };
 }
@@ -113,7 +123,7 @@ function normalizeTabs(pack: SessionPack, sessionId: string): SessionState['tabs
       url: active ? pack.page.url || tab.url || '' : tab.url || '',
       title: active ? pack.page.title || tab.title || '' : tab.title || '',
       active,
-      form_states: tab.form_states,
+      form_states: tab.form_states ?? pack.form_states,
       viewport: tab.viewport ?? pack.page.viewport ?? pack.session.viewport,
     };
   });
