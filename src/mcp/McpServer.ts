@@ -722,6 +722,15 @@ class McpServer {
         const timeoutMs = this.getTimeoutForTool(name);
 
         const resultPromise = this.executeTool(name, args || {});
+        
+        // Prevent Unhandled Promise Rejection if timeout wins and resultPromise rejects later
+        resultPromise.catch((e) => {
+          this.logStructured('background_tool_error', {
+            tool: name,
+            error: e.message,
+            note: 'This error occurred after the tool had already timed out.'
+          });
+        });
         const timeoutPromise = this.timeoutPromise(timeoutMs, name);
 
         try {

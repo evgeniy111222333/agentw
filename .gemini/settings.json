@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "llmbrowser": {
+      "command": "node",
+      "args": ["dist/mcp/index.js"],
+      "cwd": "E:\\agenw\\llm-browser"
+    }
+  }
+}
