@@ -296,12 +296,24 @@ export class SemanticLayer {
 
     snapshot.checksum = generateChecksum(snapshot.elements);
     snapshot.delta = this.differ.diff(options.previousSnapshot, snapshot);
-    
-    // Concept §6.4: 40% threshold fallback
+
+    // Concept §6.4: 40% threshold fallback + compact mode protection
+    // If maxElements was drastically reduced (e.g., compact(20) after full(500+)),
+    // delta would contain ~188K operations which inflates tokens.
+    // Skip delta when previous snapshot is significantly larger than current.
     if (snapshot.delta) {
-      const totalElements = Math.max(options.previousSnapshot?.elements.length || 0, snapshot.elements.length);
+      const currentElements = snapshot.elements.length;
+      const prevElements = options.previousSnapshot?.elements.length ?? 0;
+      const requestedMax = options.maxElements ?? 500;
+
+      // Skip delta if: 1) 40% threshold exceeded, OR
+      // 2) Previous was >2x the requested maxElements (compact mode scenario)
+      const totalElements = Math.max(prevElements, currentElements);
       const changed = snapshot.delta.stats.added + snapshot.delta.stats.removed + snapshot.delta.stats.updated;
-      if (totalElements > 0 && changed / totalElements > 0.4) {
+      const shouldSkipDelta = (totalElements > 0 && changed / totalElements > 0.4) ||
+                              (prevElements > 0 && prevElements > requestedMax * 2);
+
+      if (shouldSkipDelta) {
         delete snapshot.delta;
       }
     }
@@ -352,9 +364,16 @@ export class SemanticLayer {
     snapshot.checksum = generateChecksum(snapshot.elements);
     snapshot.delta = this.differ.diff(options.previousSnapshot, snapshot);
     if (snapshot.delta) {
-      const totalElements = Math.max(options.previousSnapshot?.elements.length || 0, snapshot.elements.length);
+      const currentElements = snapshot.elements.length;
+      const prevElements = options.previousSnapshot?.elements.length ?? 0;
+      const requestedMax = options.maxElements ?? 500;
+
+      const totalElements = Math.max(prevElements, currentElements);
       const changed = snapshot.delta.stats.added + snapshot.delta.stats.removed + snapshot.delta.stats.updated;
-      if (totalElements > 0 && changed / totalElements > 0.4) {
+      const shouldSkipDelta = (totalElements > 0 && changed / totalElements > 0.4) ||
+                              (prevElements > 0 && prevElements > requestedMax * 2);
+
+      if (shouldSkipDelta) {
         delete snapshot.delta;
       }
     }
