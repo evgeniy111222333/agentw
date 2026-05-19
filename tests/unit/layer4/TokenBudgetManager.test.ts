@@ -83,8 +83,8 @@ describe('TokenBudgetManager', () => {
       label: 'Submit form', // 11 / 4 = 3
     };
 
-    // Base overhead (8) + 1 + 2 + 3 = 14
+    // Base overhead (4) + ceil(5/4)=2 + ceil(6/4)=2 + ceil(11/4)=3 = 11
     const tokens = manager.estimateElementTokens(el);
-    expect(tokens).toBe(15);
+    expect(tokens).toBe(11);
   });
 });
