@@ -119,6 +119,8 @@ export interface SnapshotMeta {
   snapshot_bytes?: number;
   token_estimate?: number;
   compression_ratio?: number;
+  // MCP-specific metadata
+  truncated?: number;
   cache_status?: 'hit' | 'miss' | 'disabled';
   cache_key?: string;
   cache_age_ms?: number;

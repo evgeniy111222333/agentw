@@ -23,6 +23,7 @@ export interface SnapshotBuildOptions {
   previousSnapshot?: SemanticSnapshot;
   session: SessionInfo;
   maxElements?: number;
+  snapshotMode?: 'compact' | 'standard' | 'detailed';
   pageLoadTime?: number;
   actionTime?: number;
   totalTime?: number;

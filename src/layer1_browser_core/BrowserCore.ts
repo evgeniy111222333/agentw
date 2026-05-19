@@ -98,6 +98,11 @@ export class BrowserCore {
     return this.contexts.has(sessionId) && Boolean(this.pages.get(sessionId)?.size);
   }
 
+  // Check if browser is still alive and connected
+  isAlive(): boolean {
+    return this.browser?.isConnected() ?? false;
+  }
+
   async storageState(sessionId: string): Promise<any> {
     return this.getContext(sessionId).storageState();
   }

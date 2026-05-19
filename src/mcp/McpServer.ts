@@ -187,10 +187,7 @@ class McpServer {
   // Security policy
   private securityPolicy: SecurityPolicy = {
     blockedDomains: new Set([
-      'localhost',
-      '127.0.0.1',
       '0.0.0.0',
-      '::1',
       'file://',
       'chrome://',
       'about:',
@@ -198,6 +195,9 @@ class McpServer {
     allowedProtocols: new Set(['http:', 'https:']),
     maxRedirects: 5,
   };
+
+  // Configurable localhost setting
+  private allowLocalhost = true;
 
   // Structured logging
   private logBuffer: any[] = [];
@@ -274,6 +274,14 @@ class McpServer {
     // Domain blacklist from config
     const blacklist = config.security.domain_blacklist || [];
     blacklist.forEach((domain: string) => this.securityPolicy.blockedDomains.add(domain));
+
+    // Configure localhost allowance based on environment
+    this.allowLocalhost = process.env.NODE_ENV !== 'production';
+    if (!this.allowLocalhost) {
+      this.securityPolicy.blockedDomains.add('localhost');
+      this.securityPolicy.blockedDomains.add('127.0.0.1');
+      this.securityPolicy.blockedDomains.add('::1');
+    }
   }
 
   // ============================================================================
@@ -827,9 +835,9 @@ class McpServer {
     // Security check
     this.validateUrl(args.url);
 
-    // Rate limit check for navigation
-    if (!this.checkRateLimit('navigate')) {
-      throw this.createRateLimitedError('navigate');
+    // Rate limit check for navigation (using consistent tool name)
+    if (!this.checkRateLimit('browser_navigate')) {
+      throw this.createRateLimitedError('browser_navigate');
     }
 
     const sessionId = await this.ensureSession();
@@ -929,6 +937,7 @@ class McpServer {
         },
         maxElements: args.max_elements,
         previousSnapshot,
+        snapshotMode: args.snapshot_mode || 'standard',
       });
 
       this.emitProgress('browser_snapshot', 75, 'Processing snapshot...');
@@ -958,6 +967,24 @@ class McpServer {
       cleanSnapshot.meta.truncated = truncatedCount;
 
       this.emitProgress('browser_snapshot', 100, 'Snapshot complete');
+
+      // Handle delta_only mode
+      if (args.delta_only && previousSnapshot && cleanSnapshot.delta) {
+        const deltaOnlyResult = {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                meta: cleanSnapshot.meta,
+                delta: cleanSnapshot.delta,
+                available_actions: cleanSnapshot.available_actions,
+              }, null, 2),
+            },
+          ],
+        };
+        this.cacheResult(requestHash, deltaOnlyResult);
+        return deltaOnlyResult;
+      }
 
       // Cache for deduplication
       const result = {
@@ -1256,11 +1283,38 @@ class McpServer {
     for (let i = 0; i < maxPages; i++) {
       this.emitProgress('browser_paginate', (i / maxPages) * 100, `Scrolling page ${i + 1}/${maxPages}...`);
 
-      // Collect items on current page
-      const items = await page.locator(args.item_container).all();
-      for (const item of items) {
-        const html = await item.innerHTML();
-        allItems.push({ index: allItems.length, html: html.substring(0, 500) });
+      // Use SemanticLayer for proper semantic extraction
+      const snapshot = await this.semanticLayer.createSnapshot(page, {
+        session: {
+          session_id: sessionId,
+          tab_id: this.browserCore.getActiveTabId(sessionId),
+          tabs_count: 1,
+          history_length: 0,
+          cookies_count: 0,
+        },
+        maxElements: 500,
+      });
+
+      // Find items matching the container selector
+      const containerElement = snapshot.elements.find(el =>
+        (el as any).selector?.includes(args.item_container) ||
+        el.id?.includes(args.item_container.replace(/[.#]/g, ''))
+      );
+
+      if (containerElement) {
+        // Find all child elements of the container
+        const childElements = snapshot.elements.filter(el =>
+          el.parent_id === containerElement.id ||
+          (el as any).container_id === containerElement.id
+        );
+
+        allItems.push(...childElements.slice(0, 50).map((el, idx) => ({
+          index: allItems.length + idx,
+          id: el.id,
+          type: el.type,
+          label: el.label,
+          text: el.text?.substring(0, 200),
+        })));
       }
 
       // Check for next button
@@ -1473,16 +1527,21 @@ class McpServer {
     // Close browser
     await this.browserCore.close().catch(() => undefined);
 
-    // Reset state
+    // Reset state - clear all components
     this.activeSessionId = null;
     this.initialized = false;
     this.sessions.clear();
     this.lastSnapshots.clear();
+    this.rateLimits.clear();
+    this.requestCache.clear();
+    this.screenshotCache.clear();
 
     // Re-initialize browser
     await this.browserCore.initialize();
     this.initialized = true;
 
+    // Re-create actionExecutor (it holds ref to browserCore)
+    this.actionExecutor = new ActionExecutor(this.browserCore);
     this.browserRestartAttempts = 0;
 
     return {
@@ -1712,6 +1771,7 @@ class McpServer {
 
   private getRateLimitForTool(tool: string): number {
     switch (tool) {
+      case 'browser_navigate':
       case 'navigate':
         return this.navigateRateLimit;
       case 'browser_snapshot':
@@ -2089,9 +2149,8 @@ class McpServer {
 
   private async performHealthCheck(): Promise<void> {
     try {
-      // Check if browser is still alive
-      const browser = (this.browserCore as any).browser;
-      if (!browser || !browser.isConnected()) {
+      // Check if browser is still alive using the proper method
+      if (!this.browserCore.isAlive()) {
         this.logStructured('browser_disconnected_detected', {
           timestamp: new Date().toISOString(),
         });
@@ -2121,8 +2180,7 @@ class McpServer {
   }
 
   private getHealthStatus(): HealthStatus {
-    const browser = (this.browserCore as any).browser;
-    const browserAlive = browser?.isConnected?.() ?? this.initialized;
+    const browserAlive = this.browserCore.isAlive();
 
     const issues: string[] = [];
 

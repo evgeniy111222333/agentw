@@ -20,6 +20,22 @@ export class MetricsRegistry {
     this.timings.set(name, current);
   }
 
+  // Alias for histogram-like functionality
+  histogram(name: string, value: number, labels?: Record<string, string>): void {
+    // Labels are ignored in basic implementation but stored for future use
+    this.observe(name, value);
+  }
+
+  // Get counter value
+  get(name: string): number {
+    return this.counters.get(name) ?? 0;
+  }
+
+  // Get histogram/timing statistics
+  getHistogram(name: string): MetricSeries | undefined {
+    return this.timings.get(name);
+  }
+
   snapshot(): Record<string, any> {
     return {
       counters: Object.fromEntries(this.counters),
