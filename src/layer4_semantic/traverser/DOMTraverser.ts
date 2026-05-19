@@ -72,6 +72,14 @@ export interface TraversedNode {
     action?: string;
     method?: string;
     fields: string[];
+    field_details?: Array<{
+      id: string;
+      name: string;
+      type: string;
+      label?: string;
+      required: boolean;
+      placeholder?: string;
+    }>;
     field_values?: Record<string, any>;
     errors?: string[];
     is_dirty?: boolean;
@@ -641,6 +649,39 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
         field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement
       );
     const fields = controls.map((field) => ensureId(field));
+
+    // IMPROVED: Extract richer field metadata
+    const fieldDetails: Array<{
+      id: string;
+      name: string;
+      type: string;
+      label?: string;
+      required: boolean;
+      placeholder?: string;
+    }> = controls.map((field) => {
+      const fieldId = ensureId(field);
+      let label: string | undefined;
+      // Try to find label
+      if (field.id) {
+        const labelEl = el.querySelector(`label[for="${field.id}"]`);
+        if (labelEl) label = normalizeText(labelEl.textContent, 120);
+      }
+      if (!label && field instanceof HTMLInputElement) {
+        const parentLabel = field.closest('label');
+        if (parentLabel) label = normalizeText(parentLabel.textContent, 120);
+      }
+      return {
+        id: fieldId,
+        name: field.name || field.id || fieldId,
+        type: field instanceof HTMLSelectElement ? 'select' :
+              field instanceof HTMLTextAreaElement ? 'textarea' :
+              (field as HTMLInputElement).type || 'text',
+        label,
+        required: field.required,
+        placeholder: field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement ? field.placeholder : undefined,
+      };
+    });
+
     const fieldValues: Record<string, any> = {};
     const errors: string[] = [];
     let required = 0;
@@ -669,11 +710,29 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
         if (message) errors.push(`${key}: ${message}`);
       }
     }
-    const submit = el.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+
+    // IMPROVED: Better submit button detection with role and text matching
+    let submit = el.querySelector('button[type="submit"], input[type="submit"]');
+    if (!submit) {
+      // Try buttons with submit-related text
+      const allButtons = el.querySelectorAll('button');
+      for (const btn of allButtons) {
+        const text = btn.textContent?.toLowerCase() ?? '';
+        if (/submit|send|post|save|register|sign up|log in|login|create|apply|search/i.test(text)) {
+          submit = btn;
+          break;
+        }
+      }
+    }
+    if (!submit) {
+      submit = el.querySelector('button:not([type])');
+    }
+
     return {
       action: el.getAttribute('action') ?? undefined,
       method: (el.getAttribute('method') ?? 'GET').toUpperCase(),
       fields,
+      field_details: fieldDetails,
       field_values: fieldValues,
       errors: Array.from(new Set(errors)).slice(0, 20),
       is_dirty: dirty,
@@ -1655,7 +1714,15 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
     // v3: Elements inside shadow roots (entryContext.type === 'shadow') should also
     // be high priority so they survive the maxElements cap. Previously only shadow
     // HOST elements were high priority, but shadow CONTENT elements were not.
-    const isHighPriority = Boolean(iframe) || Boolean(shadow) || entryContext.type === 'shadow';
+    // IMPROVED: Also prioritize form-related elements, critical interactive elements,
+    // and elements in viewport
+    const isFormElement = tagName === 'form' || tagName === 'input' || tagName === 'select' ||
+                          tagName === 'textarea' || tagName === 'button';
+    const isImportantInteractive = role && ['button', 'link', 'checkbox', 'radio', 'textbox', 'combobox'].includes(role);
+    // IMPROVED: Prioritize viewport elements - elements partially or fully visible are more important
+    const isInViewport = rect.top <= window.innerHeight && rect.left <= window.innerWidth && rect.bottom >= 0 && rect.right >= 0;
+    const isHighPriority = Boolean(iframe) || Boolean(shadow) || entryContext.type === 'shadow' ||
+                          isFormElement || isImportantInteractive || (inViewport && visible);
     if (nodes.length >= maxElements && !isHighPriority) continue;
 
     const id = getSemanticId(el, entryContext);

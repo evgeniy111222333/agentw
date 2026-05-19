@@ -109,6 +109,7 @@ export class ContentExtractor {
     content.action = node.form?.action;
     content.method = node.form?.method ?? 'GET';
     content.fields = node.form?.fields ?? [];
+    content.field_details = node.form?.field_details;
     content.field_values = node.form?.field_values;
     content.errors = node.form?.errors ?? [];
     content.is_dirty = node.form?.is_dirty;

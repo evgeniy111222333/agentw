@@ -30,10 +30,15 @@ export interface SmartWaitOptions {
 }
 
 export class SmartWait {
+  // IMPROVED: Increased default wait times for SPA content-heavy sites
+  private static readonly DEFAULT_HARD_TIMEOUT_MS = 8000;    // 8 seconds for SPAs
+  private static readonly DEFAULT_MUTATION_QUIET_MS = 500;  // 500ms for dynamic content
+
   async waitForStability(page: Page, options: SmartWaitOptions = {}): Promise<SmartWaitResult> {
-    const hardTimeout = options.hardTimeoutMs ?? 5000;
-    const mutationQuiet = options.mutationQuietMs ?? 300;
-    const loadTimeout = options.retry ? 3000 : 1500;
+    // IMPROVED: Use larger defaults for content-heavy sites
+    const hardTimeout = options.hardTimeoutMs ?? SmartWait.DEFAULT_HARD_TIMEOUT_MS;
+    const mutationQuiet = options.mutationQuietMs ?? SmartWait.DEFAULT_MUTATION_QUIET_MS;
+    const loadTimeout = options.retry ? 4000 : 3000;  // IMPROVED: Increased from 3000/1500 to 4000/3000
     const started = performance.now();
 
     // Phase 1: Basic load state

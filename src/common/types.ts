@@ -1,9 +1,11 @@
-export type ElementType = 
+export type ElementType =
   | 'heading' | 'text' | 'link' | 'button' | 'input' | 'select' | 'textarea' | 'form'
   | 'table' | 'list' | 'image' | 'navigation' | 'article' | 'card' | 'pagination'
   | 'modal' | 'tab_group' | 'accordion' | 'notification' | 'video' | 'breadcrumb'
   | 'progress' | 'chart' | 'iframe' | 'embed' | 'shadow_host' | 'dialog' | 'menu' | 'menu_item' | 'badge'
-  | 'tooltip' | 'separator' | 'carousel' | 'rating' | 'stepper' | 'skeleton' | 'audio';
+  | 'tooltip' | 'separator' | 'carousel' | 'rating' | 'stepper' | 'skeleton' | 'audio'
+  // IMPROVED: Additional form-related types for better classification
+  | 'form_group' | 'form_label' | 'suggestion_list' | 'form_output';
 
 export interface SemanticElement {
   id: string;

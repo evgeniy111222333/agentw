@@ -570,8 +570,11 @@ export class CommandRouter {
       // Concept §2.5.2: Delta-mode by default for sequential actions on same page.
       // When a delta is available, strip the full elements array to save tokens.
       // The LLM client applies delta operations to reconstruct the current state.
+      // FIX: Only use delta mode when we have a previous snapshot with elements
+      // This prevents stripping elements on the first snapshot request
       let responseSnapshot = snapshot;
-      if (snapshot.delta && previousSnapshot) {
+      const hasValidPrevious = previousSnapshot && previousSnapshot.elements && previousSnapshot.elements.length > 0;
+      if (snapshot.delta && hasValidPrevious && activeAction.executionAction !== 'snapshot') {
         const { elements, ...deltaSnapshot } = snapshot;
         responseSnapshot = {
           ...deltaSnapshot,

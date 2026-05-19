@@ -42,7 +42,45 @@ export class ActionDiscovery {
           );
         } else if (['checkbox', 'radio'].includes(inputType)) {
           actions.push(this.targeted('click', el, el.label || 'Toggle option'));
+          // IMPROVED: Add check/uncheck for checkbox specifically
+          if (inputType === 'checkbox') {
+            actions.push(
+              this.targeted('check', el, `Check ${el.label || 'checkbox'}`, {
+                schema: { checked: 'boolean?' },
+              })
+            );
+          }
+        } else if (inputType === 'range') {
+          // IMPROVED: Add range slider action
+          actions.push(
+            this.targeted('set_value', el, el.label || el.placeholder || 'Set slider value', {
+              schema: {
+                value: 'number',
+                relative: 'boolean?',
+              },
+            })
+          );
+        } else if (inputType === 'color') {
+          // IMPROVED: Add color picker action
+          actions.push(
+            this.targeted('set_color', el, el.label || 'Select color', {
+              schema: {
+                color: 'string',
+              },
+            })
+          );
+        } else if (inputType === 'date' || inputType === 'datetime-local' || inputType === 'time' || inputType === 'week' || inputType === 'month') {
+          // IMPROVED: Add date/time picker action
+          actions.push(
+            this.targeted('set_date', el, el.label || el.placeholder || 'Set date/time', {
+              schema: {
+                value: 'string',
+                mode: 'select|type?',
+              },
+            })
+          );
         } else {
+          // IMPROVED: Enhanced text input actions
           actions.push(
             this.targeted('type', el, el.label || el.placeholder || 'Enter text', {
               schema: {
@@ -52,19 +90,50 @@ export class ActionDiscovery {
               },
             })
           );
-          if (inputType === 'search' || /search/i.test(`${el.label ?? ''} ${el.placeholder ?? ''} ${el.name ?? ''}`)) {
-            actions.push(
-              this.targeted('search_and_paginate', el, el.label || el.placeholder || 'Search', {
-                schema: {
-                  query: 'string',
-                  submit: 'boolean?',
-                  collect_all_pages: 'boolean?',
-                  max_pages: 'number?',
-                  next_id: 'string?',
-                },
-              })
-            );
-          }
+
+          // IMPROVED: Add clear input action
+          actions.push(
+            this.targeted('clear', el, `Clear ${el.label || el.placeholder || 'input'}`, {
+              schema: {},
+            })
+          );
+
+          // IMPROVED: Add append text action (doesn't clear existing)
+          actions.push(
+            this.targeted('append', el, `Append text to ${el.label || el.placeholder || 'input'}`, {
+              schema: {
+                text: 'string',
+              },
+            })
+          );
+
+          // IMPROVED: Add select all action for text inputs
+          actions.push(
+            this.targeted('select_all', el, `Select all in ${el.label || el.placeholder || 'input'}`, {
+              schema: {},
+            })
+          );
+        }
+
+        if (inputType === 'search' || /search/i.test(`${el.label ?? ''} ${el.placeholder ?? ''} ${el.name ?? ''}`)) {
+          actions.push(
+            this.targeted('search_and_paginate', el, el.label || el.placeholder || 'Search', {
+              schema: {
+                query: 'string',
+                submit: 'boolean?',
+                collect_all_pages: 'boolean?',
+                max_pages: 'number?',
+                next_id: 'string?',
+              },
+            })
+          );
+
+          // IMPROVED: Add clear search action
+          actions.push(
+            this.targeted('clear_search', el, `Clear search ${el.label || el.placeholder || ''}`, {
+              schema: {},
+            })
+          );
         }
       } else if (el.type === 'select') {
         actions.push(
@@ -74,25 +143,55 @@ export class ActionDiscovery {
           })
         );
       } else if (el.type === 'form') {
+        // IMPROVED: Enhanced form actions with better descriptions
         actions.push(this.targeted('submit', el, el.label || 'Submit form'));
+
+        // IMPROVED: Include field details in form fill actions
+        const fieldDetails = (el as any).field_details || el.fields;
         actions.push(
-          this.targeted('fill_form', el, el.label || 'Fill form', {
+          this.targeted('fill_form', el, el.label || 'Fill form fields', {
             schema: {
               fields: 'object',
               submit: 'boolean?',
               rollback: 'boolean?',
               on_failure: 'continue|rollback|fail?',
             },
-            fields: el.fields,
+            fields: fieldDetails,
           })
         );
+
         actions.push(
           this.targeted('fill_and_verify', el, el.label || 'Fill and verify form', {
             schema: {
               fields: 'object',
               on_failure: 'continue|rollback?',
             },
-            fields: el.fields,
+            fields: fieldDetails,
+          })
+        );
+
+        // IMPROVED: Add reset form action
+        actions.push(
+          this.targeted('reset_form', el, 'Reset form to initial values', {
+            schema: {},
+          })
+        );
+
+        // IMPROVED: Add clear form action (clear all fields)
+        actions.push(
+          this.targeted('clear_form', el, 'Clear all form fields', {
+            schema: {
+              keep_disabled: 'boolean?',
+            },
+          })
+        );
+
+        // IMPROVED: Add validate form action
+        actions.push(
+          this.targeted('validate_form', el, 'Validate form without submitting', {
+            schema: {
+              show_errors: 'boolean?',
+            },
           })
         );
       } else if (el.type === 'embed' || el.type === 'iframe') {

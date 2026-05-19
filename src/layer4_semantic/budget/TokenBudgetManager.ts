@@ -38,24 +38,25 @@ export interface BudgetResult {
 }
 
 // Token weight estimates per element field (characters / 4 ≈ tokens)
+// IMPROVED: Reduced weights to allow more elements within budget
 const FIELD_WEIGHTS: Record<string, number> = {
-  id: 3,
-  type: 2,
-  label: 5,
-  text: 15,
-  value: 5,
-  placeholder: 4,
-  href: 8,
-  src: 8,
-  action: 4,
+  id: 2,
+  type: 1,
+  label: 3,
+  text: 8,            // Reduced from 15
+  value: 3,
+  placeholder: 2,
+  href: 4,
+  src: 4,
+  action: 2,
   method: 1,
-  role: 2,
-  aria_label: 5,
-  validation_errors: 10,
-  fields: 20,
-  options: 15,
-  rows: 30,
-  base_overhead: 8, // JSON structure per element
+  role: 1,
+  aria_label: 3,
+  validation_errors: 5,
+  fields: 10,
+  options: 8,
+  rows: 15,
+  base_overhead: 4, // Reduced from 8 - JSON structure per element
 };
 
 // Priority scores — higher = more important = kept first
@@ -147,14 +148,20 @@ const TYPE_GUARANTEES: Record<string, number> = {
   link: 8,          // At least 8 links (navigation capability)
   article: 1,       // At least 1 article if present
   card: 3,          // At least 3 cards (content structure)
-  form: 1,          // At least 1 form (interaction capability)
+  form: 2,          // At least 2 forms (interaction capability) - IMPROVED: was 1
+  input: 3,         // At least 3 inputs - IMPROVED: added for form fields
+  button: 3,        // At least 3 buttons - IMPROVED: added for form controls
+  select: 1,        // At least 1 select - IMPROVED: added for form controls
+  textarea: 1,      // At least 1 textarea - IMPROVED: added
   text: 2,          // At least 2 text blocks (content body)
   image: 1,         // At least 1 image (visual context)
+  modal: 1,         // IMPROVED: At least 1 modal if present
+  notification: 1,  // IMPROVED: At least 1 notification if present
 };
 
 // Maximum fraction of total budget that type guarantees can consume.
-// Prevents guarantees from overwhelming the budget on pages with very few types.
-const MAX_GUARANTEE_FRACTION = 0.40;
+// IMPROVED: Increased from 0.40 to 0.50 for better coverage on content-heavy sites
+const MAX_GUARANTEE_FRACTION = 0.50;
 
 function elementCategory(type: string): string {
   if (CONTENT_TYPES.has(type)) return 'content';
@@ -166,9 +173,9 @@ function elementCategory(type: string): string {
 
 export class TokenBudgetManager {
   private defaultBudget: TokenBudget = {
-    max_tokens: 16000,      // ~16K tokens — modern LLMs handle 32K+ easily
-    reserved_tokens: 3000,  // Metadata, actions, session (increased for more actions)
-    element_budget: 13000,
+    max_tokens: 20000,     // IMPROVED: Increased from 16000 to 20000 for content-heavy sites
+    reserved_tokens: 3000, // Metadata, actions, session
+    element_budget: 17000, // max_tokens - reserved_tokens
   };
 
   /**
@@ -325,7 +332,18 @@ export class TokenBudgetManager {
       .filter(item => keptIds.has(item.element.id))
       .reduce((sum, item) => sum + item.tokens, 0);
 
-    const prunedCount = originalCount - kept.length;
+    // IMPROVED: Emergency fallback - if we got 0 elements (budget too aggressive),
+    // force-add the top 20 highest-priority elements to ensure minimum content
+    if (kept.length === 0 && scored.length > 0) {
+      const topElements = scored
+        .sort((a, b) => b.priority - a.priority)
+        .slice(0, 20);
+      for (const item of topElements) {
+        keptIds.add(item.element.id);
+      }
+    }
+
+    const prunedCount = originalCount - keptIds.size;
 
     globalMetrics.increment('llm_browser_token_budget_total');
     if (prunedCount > 0) {

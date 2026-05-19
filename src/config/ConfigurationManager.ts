@@ -102,8 +102,9 @@ export class ConfigurationManager {
         memory_limit_mb: envNumber('LLM_BROWSER_MEMORY_LIMIT_MB', 2048),
       },
       semantic: {
-        max_elements: envNumber('LLM_BROWSER_MAX_ELEMENTS', 300),
-        max_elements_hard_limit: envNumber('LLM_BROWSER_MAX_ELEMENTS_HARD_LIMIT', 1000),
+        // IMPROVED: Increased from 300 to 500 for better coverage on content-heavy sites
+        max_elements: envNumber('LLM_BROWSER_MAX_ELEMENTS', 500),
+        max_elements_hard_limit: envNumber('LLM_BROWSER_MAX_ELEMENTS_HARD_LIMIT', 1500),
         adaptive_max_elements: envBoolean('LLM_BROWSER_ADAPTIVE_MAX_ELEMENTS', true),
         max_text_length: 10000,
         visible_only: true,
@@ -117,7 +118,8 @@ export class ConfigurationManager {
         cache_ttl_ms: envNumber('LLM_BROWSER_SEMANTIC_CACHE_TTL_MS', 30000),
         cache_max_entries: envNumber('LLM_BROWSER_SEMANTIC_CACHE_MAX_ENTRIES', 250),
         token_budget: {
-          max_tokens: envNumber('LLM_BROWSER_MAX_TOKENS', 8000),
+          // IMPROVED: Increased from 8000 to 20000 for content-heavy sites
+          max_tokens: envNumber('LLM_BROWSER_MAX_TOKENS', 20000),
         },
       },
       security: {
