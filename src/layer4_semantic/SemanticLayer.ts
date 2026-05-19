@@ -310,8 +310,11 @@ export class SemanticLayer {
       // 2) Previous was >2x the requested maxElements (compact mode scenario)
       const totalElements = Math.max(prevElements, currentElements);
       const changed = snapshot.delta.stats.added + snapshot.delta.stats.removed + snapshot.delta.stats.updated;
+      // Skip delta if: 1) 40% threshold exceeded, OR
+      // 2) Previous had >2x current elements (e.g., compact after full)
+      // Note: Compare prev/current actual counts, not prev vs maxElements (hard_limit scenario)
       const shouldSkipDelta = (totalElements > 0 && changed / totalElements > 0.4) ||
-                              (prevElements > 0 && prevElements > requestedMax * 2);
+                              (prevElements > 0 && currentElements > 0 && prevElements > currentElements * 2);
 
       if (shouldSkipDelta) {
         delete snapshot.delta;
@@ -370,8 +373,11 @@ export class SemanticLayer {
 
       const totalElements = Math.max(prevElements, currentElements);
       const changed = snapshot.delta.stats.added + snapshot.delta.stats.removed + snapshot.delta.stats.updated;
+      // Skip delta if: 1) 40% threshold exceeded, OR
+      // 2) Previous had >2x current elements (e.g., compact after full)
+      // Note: Compare prev/current actual counts, not prev vs maxElements (hard_limit scenario)
       const shouldSkipDelta = (totalElements > 0 && changed / totalElements > 0.4) ||
-                              (prevElements > 0 && prevElements > requestedMax * 2);
+                              (prevElements > 0 && currentElements > 0 && prevElements > currentElements * 2);
 
       if (shouldSkipDelta) {
         delete snapshot.delta;
