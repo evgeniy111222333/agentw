@@ -75,6 +75,43 @@ describe('SemanticLayer snapshot shaping', () => {
       text: 'A detailed release note for a real project',
     }));
   });
+
+  it('builds actionable-only snapshots with affordance metadata', async () => {
+    const layer = new SemanticLayer({
+      traverser: {
+        traverse: jest.fn(async () => traversal([
+          { id: 'title', tagName: 'h1', text: 'Products', label: 'Products', attributes: {} },
+          {
+            id: 'noise',
+            tagName: 'p',
+            text: 'Decorative long page copy',
+            attributes: {},
+            boundingBox: { x: 0, y: 2000, width: 200, height: 20, in_viewport: false },
+          },
+          { id: 'buy', tagName: 'button', text: 'Buy now', label: 'Buy now', attributes: {} },
+          { id: 'search', tagName: 'input', label: 'Search', attributes: { type: 'search', placeholder: 'Search' } },
+        ])),
+      } as any,
+      pluginRegistry: passPlugin() as any,
+      authTracker: authTracker() as any,
+    });
+
+    const snapshot = await layer.createSnapshot(page('Products', 'https://shop.test') as any, {
+      session,
+      actionableOnly: true,
+      affordances: ['clickable', 'fillable'],
+    });
+
+    expect(snapshot.elements.map((element) => element.id)).toEqual(expect.arrayContaining(['title', 'buy', 'search']));
+    expect(snapshot.elements.map((element) => element.id)).not.toContain('noise');
+    expect(snapshot.available_actions.map((action) => action.action)).toEqual(expect.arrayContaining(['click', 'type']));
+    expect(snapshot.meta?.filter).toEqual(expect.objectContaining({
+      actionable_only: true,
+      before_elements: 4,
+      after_elements: 3,
+      dropped_elements: 1,
+    }));
+  });
 });
 
 const session = {
@@ -134,6 +171,7 @@ function traversal(
       required: false,
       selector: `#${node.id ?? 'node'}`,
       origin: node.origin ?? 'main',
+      boundingBox: node.boundingBox,
     })),
     stats: {
       dom_nodes_count: stats.dom_nodes_count ?? nodes.length,

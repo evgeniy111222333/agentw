@@ -140,9 +140,19 @@ export class BrowserClient {
     });
   }
 
-  async getSnapshot(sessionId: string, options: { max_elements?: number } = {}): Promise<CommandResult> {
+  async getSnapshot(sessionId: string, options: {
+    max_elements?: number;
+    actionable_only?: boolean;
+    affordances?: string[];
+    include_types?: string[];
+    exclude_types?: string[];
+  } = {}): Promise<CommandResult> {
     const params = new URLSearchParams();
     if (options.max_elements !== undefined) params.set('max_elements', String(options.max_elements));
+    if (options.actionable_only !== undefined) params.set('actionable_only', String(options.actionable_only));
+    if (options.affordances?.length) params.set('affordances', options.affordances.join(','));
+    if (options.include_types?.length) params.set('include_types', options.include_types.join(','));
+    if (options.exclude_types?.length) params.set('exclude_types', options.exclude_types.join(','));
     const suffix = params.size > 0 ? `?${params}` : '';
     return this.request(`/api/v2/sessions/${encodeURIComponent(sessionId)}/snapshot${suffix}`);
   }
@@ -157,6 +167,7 @@ export class BrowserClient {
       body: {
         action,
         target_id: options.target_id,
+        target_semantic: options.target_semantic,
         params: options.params ?? {},
         trace_id: options.trace_id,
       },
@@ -173,6 +184,7 @@ export class BrowserClient {
       body: {
         action,
         target_id: options.target_id,
+        target_semantic: options.target_semantic,
         params: { ...(options.params ?? {}), async: true },
         trace_id: options.trace_id,
       },

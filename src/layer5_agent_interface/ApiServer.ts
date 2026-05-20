@@ -260,6 +260,10 @@ export class ApiServer {
           session_id: req.params.id,
           action_params: {
             max_elements: numberQuery(req.query.max_elements),
+            actionable_only: booleanQuery(req.query.actionable_only),
+            affordances: stringListQuery(req.query.affordances),
+            include_types: stringListQuery(req.query.include_types),
+            exclude_types: stringListQuery(req.query.exclude_types),
           },
           trace_id: stringQuery(req.query.trace_id),
         });
@@ -585,6 +589,17 @@ function numberQuery(value: unknown): number | undefined {
   if (typeof value !== 'string' || value.trim() === '') return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function booleanQuery(value: unknown): boolean | undefined {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+}
+
+function stringListQuery(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  return value.split(',').map((entry) => entry.trim()).filter(Boolean);
 }
 
 function viewportBody(body: any): ViewportState | string | undefined {

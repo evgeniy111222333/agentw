@@ -21,6 +21,10 @@ const ACTION_RISK_SCORE: Record<string, number> = {
   fill_and_verify: 35, navigate_and_extract: 35, login_flow: 75,
   async_navigate: 30, cancel: 15, interact: 20,
   media_control: 20,
+  evaluate: 70, visual: 5,
+  clear: 10, append: 15, select_all: 10, check: 10,
+  set_value: 15, set_color: 15, set_date: 15, clear_search: 10,
+  reset_form: 20, clear_form: 20, validate_form: 5,
   upload: 40, download: 40, screenshot: 5, screenshot_file: 10, pdf: 15,
   fs: 30, refresh: 15, open_tab: 10, new_tab: 10, switch_tab: 5, close_tab: 15,
   define_script: 5, call_script: 30, 'try': 20,
@@ -63,6 +67,7 @@ export interface ActionExecutionResult {
 export class ActionExecutor {
   private scripts = new ScriptRegistry();
   private opStore = new OpStore();
+  private visualStates = new Map<string, VisualState>();
 
   constructor(
     private browserCore: BrowserCore,
@@ -218,21 +223,24 @@ export class ActionExecutor {
         const clickOptions: any = { timeout: params.timeout_ms ?? 5000 };
         if (params.button) clickOptions.button = params.button; // right, middle
         if (params.click_count) clickOptions.clickCount = params.click_count; // dblclick=2
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'click');
         await locator.click(clickOptions);
         await this.shortStabilization(page);
-        return;
+        return resolvedTarget;
       }
 
       case 'interact': {
         const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'interact');
         await locator.click({ timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
-        return { interacted: true };
+        return { interacted: true, ...resolvedTarget };
       }
 
       case 'type': {
         const locator = await this.resolveActionableLocator(page, targetId, action, params);
         if (params.text === undefined) throw new Error('Text is required for type action');
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'type');
         if (params.clear !== false) {
           await locator.fill(String(params.text), { timeout: params.timeout_ms ?? 5000 });
         } else {
@@ -243,7 +251,7 @@ export class ActionExecutor {
           await this.shortStabilization(page);
         }
         const value = await locator.inputValue().catch(() => String(params.text));
-        return { value };
+        return { value, ...resolvedTarget };
       }
 
       case 'select': {
@@ -255,22 +263,89 @@ export class ActionExecutor {
         const selectArg = params.label !== undefined
           ? { label: String(params.label) }
           : (Array.isArray(params.value) ? params.value.map(String) : String(params.value));
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'select');
         await locator.selectOption(selectArg, { timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
-        return { value: params.value ?? params.label };
+        return { value: params.value ?? params.label, ...resolvedTarget };
+      }
+
+      case 'clear':
+      case 'clear_search': {
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, action);
+        await locator.fill('', { timeout: params.timeout_ms ?? 5000 });
+        await this.shortStabilization(page);
+        return { value: '', ...resolvedTarget };
+      }
+
+      case 'append': {
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        if (params.text === undefined) throw new Error('Text is required for append action');
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, action);
+        await locator.type(String(params.text), { delay: params.delay ?? 0, timeout: params.timeout_ms ?? 5000 });
+        const value = await locator.inputValue().catch(() => undefined);
+        return { value, appended: String(params.text), ...resolvedTarget };
+      }
+
+      case 'select_all': {
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, action);
+        await locator.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A', { timeout: params.timeout_ms ?? 5000 });
+        return { selected: true, ...resolvedTarget };
+      }
+
+      case 'check': {
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, action);
+        const checked = params.checked !== false;
+        await locator.setChecked(checked, { timeout: params.timeout_ms ?? 5000 }).catch(async () => {
+          await locator.evaluate((el, value) => {
+            if (!(el instanceof HTMLInputElement) || !['checkbox', 'radio'].includes(el.type)) {
+              throw new Error('Target is not a checkbox or radio input');
+            }
+            if (el.checked !== value) el.click();
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }, checked);
+        });
+        await this.shortStabilization(page);
+        return { checked, ...resolvedTarget };
+      }
+
+      case 'set_value':
+      case 'set_color':
+      case 'set_date': {
+        const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        if (params.value === undefined && params.color === undefined) throw new Error('value is required');
+        const value = String(params.value ?? params.color);
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, action);
+        await locator.fill(value, { timeout: params.timeout_ms ?? 5000 }).catch(async () => {
+          await locator.evaluate((el, nextValue) => {
+            if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) {
+              throw new Error('Target does not support value assignment');
+            }
+            el.value = nextValue;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }, value);
+        });
+        await this.shortStabilization(page);
+        return { value, ...resolvedTarget };
       }
 
       case 'submit': {
         const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'submit');
         await this.submitLocator(page, locator, params.timeout_ms ?? 5000);
-        return { url: page.url() };
+        return { url: page.url(), ...resolvedTarget };
       }
 
       case 'hover': {
         const locator = await this.resolveActionableLocator(page, targetId, action, params);
+        const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'hover');
         await locator.hover({ timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
-        return;
+        return resolvedTarget;
       }
 
       case 'media_control':
@@ -306,6 +381,15 @@ export class ActionExecutor {
 
       case 'fill_form':
         return this.fillForm(sessionId, page, targetId, params, depth);
+
+      case 'reset_form':
+        return this.resetForm(page, targetId, params);
+
+      case 'clear_form':
+        return this.clearForm(page, targetId, params);
+
+      case 'validate_form':
+        return this.validateFormAction(page, targetId, params);
 
       case 'multi_click':
         return this.multiClick(sessionId, page, targetId, params, depth);
@@ -375,6 +459,12 @@ export class ActionExecutor {
       case 'fs':
       case 'file_system':
         return this.fs(sessionId, params);
+
+      case 'evaluate':
+        return this.evaluateSnippet(page, params);
+
+      case 'visual':
+        return this.visualSnapshot(sessionId, page, params);
 
       case 'screenshot': {
         const screenshotOptions = {
@@ -597,6 +687,63 @@ export class ActionExecutor {
       }
       throw error;
     }
+  }
+
+  private async resetForm(page: Page, targetId: string | undefined, params: any): Promise<Record<string, any>> {
+    const formId = targetId ?? params.form_id;
+    if (!formId) throw new Error('form_id or target_id is required for reset_form');
+    const locator = await this.resolveActionableLocator(page, formId, 'reset_form', params);
+    await locator.evaluate((form) => {
+      const target = form instanceof HTMLFormElement ? form : form.closest('form');
+      if (!target) throw new Error('Target is not a form');
+      target.reset();
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+      target.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await this.shortStabilization(page);
+    return { reset: true, form_id: formId };
+  }
+
+  private async clearForm(page: Page, targetId: string | undefined, params: any): Promise<Record<string, any>> {
+    const formId = targetId ?? params.form_id;
+    if (!formId) throw new Error('form_id or target_id is required for clear_form');
+    const locator = await this.resolveActionableLocator(page, formId, 'clear_form', params);
+    const cleared = await locator.evaluate((form, keepDisabled) => {
+      const target = form instanceof HTMLFormElement ? form : form.closest('form');
+      if (!target) throw new Error('Target is not a form');
+      let count = 0;
+      const controls = Array.from(target.querySelectorAll('input, textarea, select'));
+      for (const control of controls) {
+        if (!(control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement || control instanceof HTMLSelectElement)) continue;
+        if (keepDisabled && control.disabled) continue;
+        if (control instanceof HTMLInputElement && ['checkbox', 'radio'].includes(control.type)) {
+          control.checked = false;
+        } else if (control instanceof HTMLSelectElement) {
+          for (const option of Array.from(control.options)) option.selected = false;
+        } else {
+          control.value = '';
+        }
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+        control.dispatchEvent(new Event('change', { bubbles: true }));
+        count += 1;
+      }
+      return count;
+    }, Boolean(params.keep_disabled));
+    await this.shortStabilization(page);
+    return { cleared, form_id: formId };
+  }
+
+  private async validateFormAction(page: Page, targetId: string | undefined, params: any): Promise<Record<string, any>> {
+    const formId = targetId ?? params.form_id;
+    if (!formId) throw new Error('form_id or target_id is required for validate_form');
+    const validation = await this.validateForm(page, formId);
+    if (params.show_errors) {
+      await (await this.locatorForAny(page, formId)).evaluate((form) => {
+        const target = form instanceof HTMLFormElement ? form : form.closest('form');
+        target?.reportValidity?.();
+      }).catch(() => undefined);
+    }
+    return validation;
   }
 
   private async multiClick(
@@ -1636,22 +1783,152 @@ export class ActionExecutor {
     }, index);
   }
 
+  private async evaluateSnippet(page: Page, params: any): Promise<Record<string, any>> {
+    const source = params.script ?? params.expression ?? params.javascript;
+    if (typeof source !== 'string' || source.trim() === '') {
+      throw new Error('evaluate requires script or expression');
+    }
+    const readOnly = params.read_only !== false;
+    if (readOnly && looksMutating(source)) {
+      throw new LlmBrowserError('SECURITY_VIOLATION', 'Read-only evaluate blocked a mutating script', {
+        action: 'evaluate',
+        read_only: true,
+      });
+    }
+    const timeoutMs = Math.min(Math.max(Number(params.timeout_ms ?? 1000), 50), 10000);
+    const started = performance.now();
+    const value = await Promise.race([
+      page.evaluate(async ({ source, args }) => {
+        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+        const expressionSource = `return (${source});`;
+        try {
+          return await new AsyncFunction('args', expressionSource)(args ?? {});
+        } catch (expressionError) {
+          return await new AsyncFunction('args', source)(args ?? {});
+        }
+      }, { source, args: params.args ?? params.arguments }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('evaluate timeout')), timeoutMs)),
+    ]);
+
+    return {
+      result: serializeEvaluationResult(value),
+      read_only: readOnly,
+      duration_ms: Math.round(performance.now() - started),
+    };
+  }
+
+  private async visualSnapshot(sessionId: string, page: Page, params: any): Promise<Record<string, any>> {
+    const state = this.visualStates.get(sessionId);
+    if (params.show_cursor !== false) {
+      await this.injectVisualCursor(page, state ?? {
+        x: page.viewportSize()?.width ? Math.round(page.viewportSize()!.width / 2) : 0,
+        y: page.viewportSize()?.height ? Math.round(page.viewportSize()!.height / 2) : 0,
+        action: 'visual',
+        updated_at: new Date().toISOString(),
+      }).catch(() => undefined);
+    }
+    const fullPage = params.full_page === true;
+    const buffer = await page.screenshot({
+      type: 'png',
+      fullPage,
+      timeout: params.timeout_ms ?? 5000,
+    });
+    return {
+      image: buffer.toString('base64'),
+      mime_type: 'image/png',
+      full_page: fullPage,
+      cursor: this.visualStates.get(sessionId) ?? state,
+      viewport: page.viewportSize(),
+      url: page.url(),
+      title: await page.title().catch(() => ''),
+    };
+  }
+
   private async resolveActionableLocator(
     page: Page,
     targetId: string | undefined,
     action: string,
     params: Record<string, any> = {}
   ): Promise<Locator> {
-    if (!targetId) throw new Error(`Target ID is required for ${action} action`);
+    let resolvedTargetId = targetId;
+    let locator: Locator;
 
-    const locator = await this.locatorForAny(page, targetId);
+    if (!resolvedTargetId && params.target_semantic !== undefined) {
+      const resolved = await this.locatorForSemantic(page, action, params.target_semantic, params);
+      locator = resolved.locator;
+      resolvedTargetId = resolved.target_id;
+      params.__resolved_target = {
+        target_id: resolved.target_id,
+        query: resolved.query,
+        score: resolved.score,
+        reason: resolved.reason,
+      };
+    } else if (!resolvedTargetId && params.selector !== undefined) {
+      locator = page.locator(String(params.selector)).first();
+      resolvedTargetId = `selector:${params.selector}`;
+      params.__resolved_target = { target_id: resolvedTargetId, selector: params.selector, reason: 'selector' };
+    } else {
+      if (!resolvedTargetId) throw new Error(`Target ID is required for ${action} action`);
+      locator = await this.locatorForAny(page, resolvedTargetId);
+    }
+
     await locator.waitFor({ state: 'visible', timeout: 5000 });
 
     const isDisabled = await locator.isDisabled().catch(() => false);
-    if (isDisabled) throw new Error(`Target ${targetId} is disabled`);
+    if (isDisabled) throw new Error(`Target ${resolvedTargetId} is disabled`);
 
-    await this.assertPreconditions(page, locator, targetId, action, params);
+    await this.assertPreconditions(page, locator, resolvedTargetId, action, params);
     return locator;
+  }
+
+  private async locatorForSemantic(
+    page: Page,
+    action: string,
+    targetSemantic: unknown,
+    params: Record<string, any>
+  ): Promise<SemanticLocatorMatch> {
+    const query = typeof targetSemantic === 'string'
+      ? targetSemantic
+      : JSON.stringify(targetSemantic ?? {});
+    const parsed = parseSemanticTarget(targetSemantic, action, params);
+
+    if (parsed.selector) {
+      return {
+        locator: page.locator(parsed.selector).first(),
+        target_id: `selector:${parsed.selector}`,
+        query,
+        score: 100,
+        reason: 'semantic_selector',
+      };
+    }
+
+    for (const roleCandidate of semanticRoleCandidates(parsed)) {
+      const locator = roleCandidate.locator(page).first();
+      if ((await locator.count().catch(() => 0)) > 0) {
+        return {
+          locator,
+          target_id: `semantic:${roleCandidate.reason}:${parsed.text ?? parsed.type ?? action}`,
+          query,
+          score: roleCandidate.score,
+          reason: roleCandidate.reason,
+        };
+      }
+    }
+
+    const match = await page.evaluate(findSemanticTarget, parsed);
+    if (!match) {
+      throw new LlmBrowserError('ELEMENT_NOT_FOUND', `No element matched semantic target: ${query}`, {
+        action,
+        target_semantic: targetSemantic,
+      });
+    }
+    return {
+      locator: await this.locatorForAny(page, match.id),
+      target_id: match.id,
+      query,
+      score: match.score,
+      reason: match.reason,
+    };
   }
 
   private async assertPreconditions(
@@ -1708,6 +1985,55 @@ export class ActionExecutor {
       && Math.abs(before.y - after.y) <= 1
       && Math.abs(before.width - after.width) <= 1
       && Math.abs(before.height - after.height) <= 1;
+  }
+
+  private async trackVisualCursor(
+    sessionId: string,
+    page: Page,
+    locator: Locator,
+    action: string
+  ): Promise<Record<string, any>> {
+    const box = await locator.boundingBox().catch(() => null);
+    if (!box) return resolvedTargetPayload(locator, undefined);
+
+    const state: VisualState = {
+      x: Math.round(box.x + box.width / 2),
+      y: Math.round(box.y + box.height / 2),
+      action,
+      updated_at: new Date().toISOString(),
+    };
+    this.visualStates.set(sessionId, state);
+    await this.injectVisualCursor(page, state).catch(() => undefined);
+    return resolvedTargetPayload(locator, state);
+  }
+
+  private async injectVisualCursor(page: Page, state: VisualState): Promise<void> {
+    await page.evaluate((cursor) => {
+      const id = 'llm-browser-visual-cursor';
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = id;
+        el.setAttribute('aria-hidden', 'true');
+        document.documentElement.appendChild(el);
+      }
+      el.setAttribute('data-action', cursor.action);
+      Object.assign(el.style, {
+        position: 'fixed',
+        left: `${cursor.x}px`,
+        top: `${cursor.y}px`,
+        width: '18px',
+        height: '18px',
+        borderRadius: '999px',
+        border: '2px solid #111827',
+        background: '#38bdf8',
+        boxShadow: '0 0 0 4px rgba(56, 189, 248, 0.35)',
+        transform: 'translate(-50%, -50%)',
+        zIndex: '2147483647',
+        pointerEvents: 'none',
+        transition: 'left 120ms linear, top 120ms linear, transform 80ms ease',
+      } as Partial<CSSStyleDeclaration>);
+    }, state);
   }
 
   private async locatorForAny(page: Page, targetId: string): Promise<Locator> {
@@ -1835,6 +2161,292 @@ interface FieldState {
   checked?: boolean;
 }
 
+interface VisualState {
+  x: number;
+  y: number;
+  action: string;
+  updated_at: string;
+}
+
+interface SemanticLocatorMatch {
+  locator: Locator;
+  target_id: string;
+  query: string;
+  score: number;
+  reason: string;
+}
+
+interface SemanticTargetSpec {
+  action: string;
+  raw: string;
+  type?: string;
+  text?: string;
+  selector?: string;
+  exact?: boolean;
+  visible?: boolean;
+  enabled?: boolean;
+  name?: string;
+  placeholder?: string;
+  label?: string;
+}
+
+function parseSemanticTarget(targetSemantic: unknown, action: string, params: Record<string, any>): SemanticTargetSpec {
+  if (targetSemantic && typeof targetSemantic === 'object' && !Array.isArray(targetSemantic)) {
+    const value = targetSemantic as Record<string, any>;
+    return {
+      action,
+      raw: JSON.stringify(value),
+      type: normalizeSemanticType(value.type ?? value.element_type ?? value.role ?? params.element_type),
+      text: stringOrUndefined(value.text ?? value.name ?? value.label ?? value.query),
+      selector: stringOrUndefined(value.selector ?? params.selector),
+      exact: value.exact !== false && params.exact !== false,
+      visible: value.visible !== false,
+      enabled: value.enabled !== false,
+      name: stringOrUndefined(value.name),
+      placeholder: stringOrUndefined(value.placeholder),
+      label: stringOrUndefined(value.label),
+    };
+  }
+
+  const raw = String(targetSemantic ?? '');
+  const quoted = raw.match(/["']([^"']+)["']/)?.[1];
+  const typeMatch = raw.match(/\b(button|link|input|textbox|textarea|select|checkbox|radio|form|submit|menu item|menuitem|tab|video|audio)\b/i)?.[1];
+  const text = quoted ?? raw
+    .replace(/\b(button|link|input|textbox|textarea|select|checkbox|radio|form|submit|menu item|menuitem|tab|video|audio)\b/ig, '')
+    .replace(/\b(with|text|named|label|that|contains|clickable|visible|enabled)\b/ig, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return {
+    action,
+    raw,
+    type: normalizeSemanticType(params.element_type ?? typeMatch),
+    text: text || undefined,
+    selector: stringOrUndefined(params.selector),
+    exact: params.exact !== false,
+    visible: true,
+    enabled: true,
+  };
+}
+
+function semanticRoleCandidates(spec: SemanticTargetSpec): Array<{ score: number; reason: string; locator: (page: Page) => Locator }> {
+  const text = spec.text ?? spec.label ?? spec.name ?? spec.placeholder;
+  const exact = spec.exact !== false;
+  const result: Array<{ score: number; reason: string; locator: (page: Page) => Locator }> = [];
+  if (!text) return result;
+
+  const type = spec.type ?? typeForAction(spec.action);
+  if (type === 'button' || type === 'submit' || spec.action === 'click' || spec.action === 'submit') {
+    result.push({ score: 96, reason: 'role_button_name', locator: (page) => page.getByRole('button', { name: text, exact }) });
+  }
+  if (type === 'link' || spec.action === 'navigate') {
+    result.push({ score: 95, reason: 'role_link_name', locator: (page) => page.getByRole('link', { name: text, exact }) });
+  }
+  if (['input', 'textbox', 'textarea'].includes(String(type)) || spec.action === 'type') {
+    result.push({ score: 94, reason: 'label_textbox', locator: (page) => page.getByLabel(text, { exact }) });
+    result.push({ score: 92, reason: 'placeholder_textbox', locator: (page) => page.getByPlaceholder(text, { exact }) });
+    result.push({ score: 90, reason: 'role_textbox_name', locator: (page) => page.getByRole('textbox', { name: text, exact }) });
+    result.push({ score: 88, reason: 'role_searchbox_name', locator: (page) => page.getByRole('searchbox', { name: text, exact }) });
+  }
+  if (type === 'select' || spec.action === 'select') {
+    result.push({ score: 92, reason: 'role_combobox_name', locator: (page) => page.getByRole('combobox', { name: text, exact }) });
+    result.push({ score: 91, reason: 'label_select', locator: (page) => page.getByLabel(text, { exact }) });
+  }
+  if (type === 'checkbox' || spec.action === 'check') {
+    result.push({ score: 92, reason: 'role_checkbox_name', locator: (page) => page.getByRole('checkbox', { name: text, exact }) });
+  }
+  if (type === 'radio') {
+    result.push({ score: 92, reason: 'role_radio_name', locator: (page) => page.getByRole('radio', { name: text, exact }) });
+  }
+
+  return result;
+}
+
+function findSemanticTarget(spec: SemanticTargetSpec): { id: string; score: number; reason: string } | undefined {
+  const semanticIdAttr = 'data-llm-browser-id';
+  const state = window as unknown as { __llmBrowserNextId?: number };
+  state.__llmBrowserNextId ??= 1;
+  const localNormalizeType = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.trim() ? value.toLowerCase().replace(/[\s_-]+/g, '_') : undefined;
+  const localTypeForAction = (action: string): string | undefined => {
+    if (['click', 'hover', 'interact'].includes(action)) return 'button';
+    if (['type', 'append', 'clear', 'clear_search', 'select_all'].includes(action)) return 'input';
+    if (['select', 'set_value', 'set_color', 'set_date'].includes(action)) return 'select';
+    if (['submit', 'reset_form', 'clear_form', 'validate_form'].includes(action)) return 'form';
+    if (action === 'check') return 'checkbox';
+    return undefined;
+  };
+  const localSelectorsForType = (type: string | undefined, action: string): string => {
+    if (type === 'button' || type === 'submit' || action === 'click' || action === 'submit') {
+      return 'button, input[type="button"], input[type="submit"], input[type="reset"], a[href], [role="button"], [role="link"], [onclick], [tabindex="0"], summary, [aria-expanded]';
+    }
+    if (['input', 'textbox', 'textarea'].includes(String(type)) || action === 'type' || action === 'append' || action === 'clear') {
+      return 'input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"], [role="searchbox"]';
+    }
+    if (type === 'select' || action === 'select') return 'select, [role="combobox"], [role="listbox"]';
+    if (type === 'checkbox' || action === 'check') return 'input[type="checkbox"], [role="checkbox"], input[type="radio"], [role="radio"]';
+    if (type === 'form' || action.endsWith('_form')) return 'form, [role="form"]';
+    if (type === 'link' || action === 'navigate') return 'a[href], [role="link"]';
+    if (type === 'video') return 'video, iframe[src*="youtube"], iframe[src*="vimeo"]';
+    if (type === 'audio') return 'audio';
+    return 'button, a[href], input:not([type="hidden"]), textarea, select, form, [role], [onclick], [tabindex="0"], summary, video, audio';
+  };
+  const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const visible = (el: Element): boolean => {
+    if (!(el instanceof HTMLElement)) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || '1') > 0 && rect.width > 0 && rect.height > 0;
+  };
+  const enabled = (el: Element): boolean => !(
+    (el instanceof HTMLButtonElement || el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement)
+      && el.disabled
+  ) && (el as HTMLElement).getAttribute('aria-disabled') !== 'true';
+  const escapeAttribute = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const ensureId = (el: HTMLElement): string => {
+    const existing = el.getAttribute(semanticIdAttr);
+    if (existing) return existing;
+    if (el.id) return el.id;
+    const id = `zs-${state.__llmBrowserNextId}`;
+    state.__llmBrowserNextId = (state.__llmBrowserNextId ?? 1) + 1;
+    el.setAttribute(semanticIdAttr, id);
+    return id;
+  };
+  const labelText = (el: HTMLElement): string => {
+    const explicit = el.id ? document.querySelector(`label[for="${escapeAttribute(el.id)}"]`) : null;
+    const implicit = el.closest('label');
+    return normalize((explicit ?? implicit)?.textContent);
+  };
+  const elementType = (el: HTMLElement): string => {
+    const tag = el.tagName.toLowerCase();
+    const role = normalize(el.getAttribute('role'));
+    const inputType = el instanceof HTMLInputElement ? normalize(el.type) : undefined;
+    if (tag === 'button' || role === 'button' || inputType === 'button' || inputType === 'submit' || inputType === 'reset') return 'button';
+    if (tag === 'a' || role === 'link') return 'link';
+    if (tag === 'select' || role === 'combobox' || role === 'listbox') return 'select';
+    if (tag === 'textarea') return 'textarea';
+    if (tag === 'form') return 'form';
+    if (inputType === 'checkbox') return 'checkbox';
+    if (inputType === 'radio') return 'radio';
+    if (tag === 'input' || role === 'textbox' || role === 'searchbox' || el.isContentEditable) return 'input';
+    if (tag === 'video') return 'video';
+    if (tag === 'audio') return 'audio';
+    return tag;
+  };
+  const textOf = (el: HTMLElement): string => normalize([
+    el.textContent,
+    el.getAttribute('aria-label'),
+    el.getAttribute('title'),
+    el.getAttribute('placeholder'),
+    el.getAttribute('name'),
+    el.id,
+    el.getAttribute('data-testid'),
+    el instanceof HTMLInputElement ? el.value : '',
+    labelText(el),
+  ].filter(Boolean).join(' '));
+  const type = localNormalizeType(spec.type ?? localTypeForAction(spec.action));
+  const query = normalize(spec.text ?? spec.label ?? spec.name ?? spec.placeholder ?? spec.raw);
+  const tokens = query.split(/\s+/).filter(Boolean);
+  const selectors = localSelectorsForType(type, spec.action);
+  const candidates = Array.from(document.querySelectorAll(selectors)).filter((entry): entry is HTMLElement => entry instanceof HTMLElement);
+  const scored: Array<{ el: HTMLElement; score: number; reason: string }> = [];
+
+  for (const el of candidates) {
+    if (spec.visible !== false && !visible(el)) continue;
+    if (spec.enabled !== false && !enabled(el)) continue;
+    const actualType = elementType(el);
+    let score = 0;
+    const reasons: string[] = [];
+    if (!type || type === actualType || (type === 'textbox' && ['input', 'textarea'].includes(actualType)) || (type === 'submit' && actualType === 'button')) {
+      score += 30;
+      reasons.push(`type:${actualType}`);
+    }
+    const haystack = textOf(el);
+    if (query) {
+      if (haystack === query) {
+        score += 60;
+        reasons.push('exact_text');
+      } else if (haystack.includes(query)) {
+        score += 45;
+        reasons.push('contains_text');
+      } else {
+        const matchedTokens = tokens.filter((token) => haystack.includes(token)).length;
+        if (tokens.length > 0 && matchedTokens / tokens.length >= 0.65) {
+          score += Math.round(35 * (matchedTokens / tokens.length));
+          reasons.push('token_match');
+        }
+      }
+    }
+    if (el instanceof HTMLInputElement && spec.action === 'type') score += 10;
+    if (el instanceof HTMLButtonElement && ['click', 'submit'].includes(spec.action)) score += 10;
+    if (score >= 45) scored.push({ el, score, reason: reasons.join(',') || 'semantic_match' });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  const winner = scored[0];
+  if (!winner) return undefined;
+  return {
+    id: ensureId(winner.el),
+    score: winner.score,
+    reason: winner.reason,
+  };
+}
+
+function selectorsForSemanticType(type: string | undefined, action: string): string {
+  if (type === 'button' || type === 'submit' || action === 'click' || action === 'submit') {
+    return 'button, input[type="button"], input[type="submit"], input[type="reset"], a[href], [role="button"], [role="link"], [onclick], [tabindex="0"], summary, [aria-expanded]';
+  }
+  if (['input', 'textbox', 'textarea'].includes(String(type)) || action === 'type' || action === 'append' || action === 'clear') {
+    return 'input:not([type="hidden"]), textarea, [contenteditable="true"], [role="textbox"], [role="searchbox"]';
+  }
+  if (type === 'select' || action === 'select') return 'select, [role="combobox"], [role="listbox"]';
+  if (type === 'checkbox' || action === 'check') return 'input[type="checkbox"], [role="checkbox"], input[type="radio"], [role="radio"]';
+  if (type === 'form' || action.endsWith('_form')) return 'form, [role="form"]';
+  if (type === 'link' || action === 'navigate') return 'a[href], [role="link"]';
+  if (type === 'video') return 'video, iframe[src*="youtube"], iframe[src*="vimeo"]';
+  if (type === 'audio') return 'audio';
+  return 'button, a[href], input:not([type="hidden"]), textarea, select, form, [role], [onclick], [tabindex="0"], summary, video, audio';
+}
+
+function normalizeSemanticType(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.trim() === '') return undefined;
+  return value.toLowerCase().replace(/[\s_-]+/g, '_');
+}
+
+function typeForAction(action: string): string | undefined {
+  if (['click', 'hover', 'interact'].includes(action)) return 'button';
+  if (['type', 'append', 'clear', 'clear_search', 'select_all'].includes(action)) return 'input';
+  if (['select', 'set_value', 'set_color', 'set_date'].includes(action)) return 'select';
+  if (['submit', 'reset_form', 'clear_form', 'validate_form'].includes(action)) return 'form';
+  if (action === 'check') return 'checkbox';
+  return undefined;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function looksMutating(source: string): boolean {
+  return /\b(click|submit|remove|append|prepend|replaceChildren|insertAdjacent|setAttribute|removeAttribute|write|open|fetch|XMLHttpRequest|sendBeacon|localStorage\.setItem|sessionStorage\.setItem)\b/i.test(source)
+    || /(?:^|[^=!<>])=(?!=|>)/.test(source);
+}
+
+function serializeEvaluationResult(value: unknown): unknown {
+  if (value === undefined || value === null) return value;
+  if (['string', 'number', 'boolean'].includes(typeof value)) return value;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return String(value);
+  }
+}
+
+function resolvedTargetPayload(_locator: Locator, state?: VisualState): Record<string, any> {
+  return {
+    ...(state ? { cursor: state } : {}),
+  };
+}
+
 function stripRoutingParams(params: Record<string, any>): Record<string, any> {
   const clone = { ...params };
   delete clone.element_id;
@@ -1858,7 +2470,11 @@ function unique(values: string[]): string[] {
 }
 
 function defaultPreconditions(action: string): string[] {
-  if (['click', 'type', 'select', 'submit', 'hover', 'interact', 'download', 'screenshot'].includes(action)) {
+  if ([
+    'click', 'type', 'select', 'submit', 'hover', 'interact', 'download', 'screenshot',
+    'clear', 'append', 'select_all', 'check', 'set_value', 'set_color', 'set_date',
+    'clear_search', 'reset_form', 'clear_form', 'validate_form',
+  ].includes(action)) {
     return ['element_visible', 'element_enabled', 'element_stable', 'no_modal_open', 'page_loaded'];
   }
   return [];

@@ -48,6 +48,7 @@ import { LlmBrowserError, classifyActionError } from '../common/errors';
 import { globalMetrics } from '../common/MetricsRegistry';
 import { globalEventBus } from '../common/EventBus';
 import type { Request as ExpressRequest } from 'express';
+import { Bouncer } from '../layer2_action_execution/Bouncer';
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -144,6 +145,7 @@ class McpServer {
   private actionExecutor: ActionExecutor;
   private semanticLayer: SemanticLayer;
   private dashboard: DiagnosticsDashboard;
+  private bouncer: Bouncer;
 
   // Session management - Enhanced
   private activeSessionId: string | null = null;
@@ -220,10 +222,38 @@ class McpServer {
   private isShuttingDown = false;
   private shutdownTimeout: ReturnType<typeof setTimeout> | null = null;
 
+  // ============================================================
+  // MEMORY MANAGEMENT - Multi-level Cleanup Strategy
+  // ============================================================
+
+  // Memory pressure tracking
+  private memoryPressureLevel: 'low' | 'medium' | 'high' | 'critical' = 'low';
+  private lastGcTimestamp = 0;
+  private gcCooldownMs = 30000; // 30 seconds between GC attempts
+
+  // Aggressive cleanup thresholds
+  private memoryThresholds = {
+    warning: 512 * 1024 * 1024,    // 512MB - start being careful
+    critical: 1024 * 1024 * 1024, // 1GB - trigger cleanup
+    maxElementsSoftLimit: 800,     // Soft limit for snapshots
+    maxElementsHardLimit: 400,     // Hard limit under memory pressure
+  };
+
+  // Critical system tools that bypass resource limits for self-healing
+  private readonly RESCUE_TOOLS = new Set([
+    'browser_diagnostics',
+    'browser_close_session',
+    'browser_restart',
+    'browser_ping',
+    'browser_metrics',
+    'browser_session_info',
+  ]);
+
   constructor() {
     this.browserCore = new BrowserCore();
     this.stateManager = new StateManagementLayer();
     this.actionExecutor = new ActionExecutor(this.browserCore);
+    this.bouncer = new Bouncer();
 
     const pluginRegistry = createDefaultPluginRegistry(
       ConfigurationManager.getInstance().getConfig().plugin_registry
@@ -382,6 +412,32 @@ class McpServer {
                   'If true, returns only changes since from_snapshot_id. ' +
                   'Saves 70-90% tokens on stable pages. Always returns available_actions.',
               },
+              actionable_only: {
+                type: 'boolean',
+                description:
+                  'If true, returns only actionable controls plus compact decision context ' +
+                  '(forms, buttons, links, inputs, headings, cards, errors). Use for heavy sites.',
+              },
+              affordances: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'Filter page by affordance: clickable, navigable, fillable, selectable, submittable, media, readable, visible.',
+              },
+              include_types: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Keep only these semantic element types in addition to affordance matches.',
+              },
+              exclude_types: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Drop these semantic element types from the response.',
+              },
+              auto_bounce: {
+                type: 'boolean',
+                description: 'Automatically dismiss safe cookie/newsletter/region popups before extracting (default true).',
+              },
             },
           },
         },
@@ -416,6 +472,12 @@ class McpServer {
                   'Element ID to target (from snapshot elements array). ' +
                   'Omit for page-level actions like go_back, refresh, scroll.',
               },
+              target_semantic: {
+                type: ['string', 'object'],
+                description:
+                  'Zero-shot target query, e.g. "button with text Add to Cart" or {type:"input", label:"Search"}. ' +
+                  'Server resolves it locally without requiring a prior snapshot.',
+              },
               params: {
                 type: 'object',
                 description:
@@ -436,8 +498,105 @@ class McpServer {
                   'If true (default), automatically return snapshot after action. ' +
                   'Set to false to skip snapshot for faster sequential actions.',
               },
+              delta_only: {
+                type: 'boolean',
+                description: 'When auto_snapshot is true, return only post-action delta when possible.',
+              },
+              actionable_only: {
+                type: 'boolean',
+                description: 'When auto_snapshot is true, use actionable-only post-action snapshot.',
+              },
+              affordances: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'When auto_snapshot is true, filter post-action snapshot by affordances.',
+              },
             },
             required: ['action'],
+          },
+        },
+
+        // -------------------------------------------------------------------------
+        // browser_run_flow - Run action chain in one round trip
+        // -------------------------------------------------------------------------
+        {
+          name: 'browser_run_flow',
+          description:
+            'Run a sequence of browser actions in one MCP call. Use this to avoid repeated LLM↔browser round trips. ' +
+            'Steps support target_id or target_semantic. Returns per-step results and optional final snapshot.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              steps: {
+                type: 'array',
+                items: { type: 'object' },
+                description: 'Array of steps: {action, target_id?, target_semantic?, params?}.',
+              },
+              actions: {
+                type: 'array',
+                items: { type: 'object' },
+                description: 'Alias for steps.',
+              },
+              stop_on_error: {
+                type: 'boolean',
+                description: 'Stop flow at first failed step (default true).',
+              },
+              auto_snapshot: {
+                type: 'boolean',
+                description: 'Return final semantic snapshot after flow (default true).',
+              },
+              actionable_only: {
+                type: 'boolean',
+                description: 'Use actionable-only final snapshot.',
+              },
+              affordances: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Filter final snapshot by affordances.',
+              },
+              delta_only: {
+                type: 'boolean',
+                description: 'Return only final delta when possible.',
+              },
+            },
+          },
+        },
+
+        // -------------------------------------------------------------------------
+        // browser_evaluate - Execute JS snippet without snapshot
+        // -------------------------------------------------------------------------
+        {
+          name: 'browser_evaluate',
+          description:
+            'Evaluate a JavaScript expression/snippet in the page and return the serializable result without taking a snapshot. ' +
+            'Default read_only mode blocks obvious DOM/network mutations.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              script: { type: 'string', description: 'JavaScript expression or snippet to evaluate.' },
+              expression: { type: 'string', description: 'Alias for script.' },
+              args: { type: 'object', description: 'Optional object available to the snippet as args.' },
+              read_only: { type: 'boolean', description: 'Block mutating snippets when true (default true).' },
+              timeout_ms: { type: 'number', description: 'Max runtime in ms (default 1000).' },
+            },
+          },
+        },
+
+        // -------------------------------------------------------------------------
+        // browser_visual - Visual screen with cursor overlay
+        // -------------------------------------------------------------------------
+        {
+          name: 'browser_visual',
+          description:
+            'Return a viewport screenshot with the agent cursor overlay and last pointer position. ' +
+            'Use to visually inspect what the browser is doing; set LLM_BROWSER_HEADLESS=false for a headed Playwright window.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              full_page: { type: 'boolean', description: 'Capture full page instead of viewport (default false).' },
+              show_cursor: { type: 'boolean', description: 'Draw cursor overlay before capture (default true).' },
+              timeout_ms: { type: 'number', description: 'Screenshot timeout.' },
+            },
           },
         },
 
@@ -707,30 +866,46 @@ class McpServer {
       });
 
       try {
-        // Check rate limits
-        if (!this.checkRateLimit(name)) {
+        // ============================================================
+        // RESCUE TOOLS - Always allowed, bypass all checks
+        // ============================================================
+        const isRescue = this.isRescueTool(name);
+
+        // Check rate limits (skip for rescue tools)
+        if (!isRescue && !this.checkRateLimit(name)) {
           const error = this.createRateLimitedError(name);
           this.recordError(error);
           return this.formatErrorResponse(error);
         }
 
-        // Ensure session exists
-        await this.ensureSession();
+        // For heavy operations, check memory and potentially cleanup
+        if (!isRescue && (name === 'browser_snapshot' || name === 'browser_paginate')) {
+          // Assess memory pressure before heavy operation
+          this.memoryPressureLevel = this.assessMemoryPressure();
+
+          // Perform smart cleanup if needed
+          if (this.memoryPressureLevel !== 'low') {
+            this.logStructured('pre_operation_memory_check', {
+              tool: name,
+              pressure: this.memoryPressureLevel,
+              memory: this.getMemoryUsage(),
+            });
+            await this.performSmartCleanup();
+          }
+        }
+
+        // Ensure session exists (skip for rescue tools that don't need browser)
+        if (!isRescue || name === 'browser_close_session' || name === 'browser_restart') {
+          await this.ensureSession();
+        } else if (name === 'browser_session_info' || name === 'browser_ping' || name === 'browser_metrics' || name === 'browser_diagnostics') {
+          // These tools can work even without a session
+        }
 
         // Execute with timeout
         let result;
         const timeoutMs = this.getTimeoutForTool(name);
 
         const resultPromise = this.executeTool(name, args || {});
-        
-        // Prevent Unhandled Promise Rejection if timeout wins and resultPromise rejects later
-        resultPromise.catch((e) => {
-          this.logStructured('background_tool_error', {
-            tool: name,
-            error: e.message,
-            note: 'This error occurred after the tool had already timed out.'
-          });
-        });
         const timeoutPromise = this.timeoutPromise(timeoutMs, name);
 
         try {
@@ -796,6 +971,15 @@ class McpServer {
       case 'browser_action':
         return await this.handleAction(args);
 
+      case 'browser_run_flow':
+        return await this.handleRunFlow(args);
+
+      case 'browser_evaluate':
+        return await this.handleEvaluate(args);
+
+      case 'browser_visual':
+        return await this.handleVisual(args);
+
       case 'browser_list_tabs':
         return await this.handleListTabs();
 
@@ -858,6 +1042,7 @@ class McpServer {
       const page = this.browserCore.getPage(sessionId);
 
       this.emitProgress('browser_navigate', 75, 'Page loaded, recording state...');
+      const bouncer = await this.bouncer.dismiss(page).catch(() => undefined);
 
       this.stateManager.recordPageState(sessionId, {
         url: page.url(),
@@ -877,6 +1062,7 @@ class McpServer {
               status: 'navigated',
               url: page.url(),
               title: await page.title(),
+              bouncer,
               timestamp: new Date().toISOString(),
             }),
           },
@@ -896,6 +1082,14 @@ class McpServer {
     from_snapshot_id?: string;
     checksum?: string;
     delta_only?: boolean;
+    actionable_only?: boolean;
+    actionableOnly?: boolean;
+    affordances?: string[];
+    include_types?: string[];
+    includeTypes?: string[];
+    exclude_types?: string[];
+    excludeTypes?: string[];
+    auto_bounce?: boolean;
   }): Promise<any> {
     // Check concurrent snapshot limit
     if (this.activeSnapshotCount >= this.maxConcurrentSnapshots) {
@@ -914,6 +1108,7 @@ class McpServer {
       const page = this.browserCore.getPage(sessionId);
       const tabs = await this.browserCore.listTabs(sessionId);
       const tabId = this.browserCore.getActiveTabId(sessionId);
+      const bouncer = await this.bouncer.dismiss(page, { enabled: args.auto_bounce !== false }).catch(() => undefined);
 
       this.emitProgress('browser_snapshot', 25, 'Extracting semantic data...');
 
@@ -936,6 +1131,23 @@ class McpServer {
         return cachedResult;
       }
 
+      // Apply adaptive max elements based on memory pressure
+      const adaptiveMaxElements = this.getAdaptiveMaxElements(args.max_elements);
+
+      // For heavy sites (Amazon-like), use aggressive limits
+      const isHeavySite = this.isHeavySite(page.url());
+      const effectiveMaxElements = isHeavySite
+        ? Math.min(adaptiveMaxElements, 300) // Heavy sites cap at 300
+        : adaptiveMaxElements;
+
+      this.logStructured('snapshot_config', {
+        requested_max_elements: args.max_elements,
+        adaptive_max_elements: adaptiveMaxElements,
+        effective_max_elements: effectiveMaxElements,
+        is_heavy_site: isHeavySite,
+        memory_pressure: this.memoryPressureLevel,
+      });
+
       const snapshot = await this.semanticLayer.createSnapshot(page, {
         session: {
           session_id: sessionId,
@@ -944,10 +1156,19 @@ class McpServer {
           history_length: 0,
           cookies_count: 0,
         },
-        maxElements: args.max_elements,
+        maxElements: effectiveMaxElements,
         previousSnapshot,
         snapshotMode: args.snapshot_mode || 'standard',
+        ...this.snapshotFilters(args),
       });
+      if (bouncer && snapshot.meta) {
+        snapshot.meta.bouncer = {
+          attempted: bouncer.attempted,
+          closed: bouncer.closed,
+          duration_ms: bouncer.duration_ms,
+          actions: bouncer.actions,
+        };
+      }
 
       this.emitProgress('browser_snapshot', 75, 'Processing snapshot...');
 
@@ -1028,8 +1249,13 @@ class McpServer {
   private async handleAction(args: {
     action: string;
     target_id?: string;
+    target_semantic?: string | Record<string, any>;
     params?: any;
     auto_snapshot?: boolean;
+    delta_only?: boolean;
+    actionable_only?: boolean;
+    actionableOnly?: boolean;
+    affordances?: string[];
   }): Promise<any> {
     const autoSnapshot = args.auto_snapshot !== false;
 
@@ -1044,7 +1270,10 @@ class McpServer {
         sessionId,
         args.action,
         args.target_id,
-        args.params
+        {
+          ...(args.params ?? {}),
+          ...(args.target_semantic !== undefined ? { target_semantic: args.target_semantic } : {}),
+        }
       );
 
       this.emitProgress('browser_action', 75, 'Action completed');
@@ -1072,10 +1301,12 @@ class McpServer {
         this.emitProgress('browser_action', 85, 'Capturing post-action snapshot...');
 
         try {
-          const snapshot = await this.getQuickSnapshot(sessionId);
+          const snapshot = await this.getQuickSnapshot(sessionId, args);
           response.content[0].text = JSON.stringify({
             action_result: JSON.parse(response.content[0].text),
-            post_action_snapshot: snapshot,
+            ...(args.delta_only && snapshot.delta
+              ? { post_action_delta: { meta: snapshot.meta, delta: snapshot.delta, available_actions: snapshot.available_actions } }
+              : { post_action_snapshot: snapshot }),
           }, null, 2);
         } catch (snapshotError: any) {
           // Include error but don't fail the action
@@ -1103,6 +1334,123 @@ class McpServer {
 
       throw enhancedError;
     }
+  }
+
+  private async handleRunFlow(args: {
+    steps?: any[];
+    actions?: any[];
+    stop_on_error?: boolean;
+    auto_snapshot?: boolean;
+    delta_only?: boolean;
+    actionable_only?: boolean;
+    actionableOnly?: boolean;
+    affordances?: string[];
+  }): Promise<any> {
+    const sessionId = await this.ensureSession();
+    const steps = args.steps ?? args.actions;
+    if (!Array.isArray(steps)) {
+      throw new LlmBrowserError('MISSING_PARAM', 'browser_run_flow requires steps or actions');
+    }
+
+    const previousSnapshot = this.lastSnapshots.get(sessionId);
+    const result = await this.actionExecutor.executeAction(sessionId, 'sequence', undefined, {
+      steps: steps.map((step) => ({
+        ...step,
+        params: {
+          ...(step.params ?? step.action_params ?? step.parameters ?? {}),
+          ...(step.target_semantic !== undefined ? { target_semantic: step.target_semantic } : {}),
+        },
+      })),
+      stop_on_error: args.stop_on_error,
+    });
+
+    this.updateSessionActivity(sessionId);
+
+    const payload: Record<string, any> = {
+      status: 'success',
+      mode: 'flow',
+      duration_ms: result.duration_ms,
+      ...result.data,
+    };
+
+    if (args.auto_snapshot !== false) {
+      const snapshot = await this.getQuickSnapshot(sessionId, {
+        ...args,
+        previousSnapshot,
+      } as any);
+      if (args.delta_only && snapshot.delta) {
+        payload.final_delta = {
+          meta: snapshot.meta,
+          delta: snapshot.delta,
+          available_actions: snapshot.available_actions,
+        };
+      } else {
+        payload.final_snapshot = snapshot;
+      }
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(payload, null, 2),
+        },
+      ],
+    };
+  }
+
+  private async handleEvaluate(args: {
+    script?: string;
+    expression?: string;
+    javascript?: string;
+    args?: Record<string, any>;
+    read_only?: boolean;
+    timeout_ms?: number;
+  }): Promise<any> {
+    const sessionId = await this.ensureSession();
+    const result = await this.actionExecutor.executeAction(sessionId, 'evaluate', undefined, args);
+    this.updateSessionActivity(sessionId);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            status: 'success',
+            ...result.data,
+          }, null, 2),
+        },
+      ],
+    };
+  }
+
+  private async handleVisual(args: {
+    full_page?: boolean;
+    show_cursor?: boolean;
+    timeout_ms?: number;
+  }): Promise<any> {
+    const sessionId = await this.ensureSession();
+    const result = await this.actionExecutor.executeAction(sessionId, 'visual', undefined, args);
+    const config = ConfigurationManager.getInstance().getConfig().browser;
+    return {
+      content: [
+        {
+          type: 'image',
+          data: result.data?.image,
+          mimeType: 'image/png',
+        },
+        {
+          type: 'text',
+          text: JSON.stringify({
+            cursor: result.data?.cursor,
+            viewport: result.data?.viewport,
+            url: result.data?.url,
+            title: result.data?.title,
+            headless: config.headless,
+            headed_hint: config.headless ? 'Set LLM_BROWSER_HEADLESS=false before starting MCP to see a live Playwright window.' : undefined,
+          }, null, 2),
+        },
+      ],
+    };
   }
 
   private async handleListTabs(): Promise<any> {
@@ -1178,6 +1526,8 @@ class McpServer {
 
   private async handleDiagnostics(args: { summary_only?: boolean }): Promise<any> {
     const health = this.getHealthStatus();
+    const memory = this.getMemoryUsage();
+    this.memoryPressureLevel = this.assessMemoryPressure();
 
     if (args.summary_only) {
       return {
@@ -1189,7 +1539,13 @@ class McpServer {
               score: health.browserAlive ? (health.sessionsActive > 0 ? 0.9 : 0.7) : 0.3,
               browser: health.browserAlive ? 'ok' : 'dead',
               sessions: health.sessionsActive,
+              memory: {
+                pressure: this.memoryPressureLevel,
+                heap_used_mb: Math.round(memory.heapUsed / 1024 / 1024),
+                rss_mb: Math.round(memory.rss / 1024 / 1024),
+              },
               issues: health.issues.length > 0 ? health.issues : undefined,
+              recommendations: this.getMemoryRecommendations(),
             }, null, 2),
           },
         ],
@@ -1202,10 +1558,53 @@ class McpServer {
       content: [
         {
           type: 'text',
-          text: JSON.stringify(report, null, 2),
+          text: JSON.stringify({
+            ...report,
+            memory: {
+              pressure: this.memoryPressureLevel,
+              heap_used_mb: Math.round(memory.heapUsed / 1024 / 1024),
+              heap_total_mb: Math.round(memory.heapTotal / 1024 / 1024),
+              rss_mb: Math.round(memory.rss / 1024 / 1024),
+              threshold_warning_mb: Math.round(this.memoryThresholds.warning / 1024 / 1024),
+              threshold_critical_mb: Math.round(this.memoryThresholds.critical / 1024 / 1024),
+            },
+            caches: {
+              snapshots: this.lastSnapshots.size,
+              screenshots: this.screenshotCache.size,
+              requests: this.requestCache.size,
+            },
+            recommendations: this.getMemoryRecommendations(),
+          }, null, 2),
         },
       ],
     };
+  }
+
+  /**
+   * Get memory-related recommendations for the user
+   */
+  private getMemoryRecommendations(): string[] {
+    const recommendations: string[] = [];
+
+    switch (this.memoryPressureLevel) {
+      case 'critical':
+        recommendations.push('CRITICAL: Memory nearly exhausted. Use browser_restart immediately.');
+        recommendations.push('Consider using browser_close_session to free resources.');
+        break;
+      case 'high':
+        recommendations.push('HIGH: Memory pressure detected.');
+        recommendations.push('Use compact snapshots (max_elements: 100) to reduce memory usage.');
+        recommendations.push('browser_restart recommended if performance degrades.');
+        break;
+      case 'medium':
+        recommendations.push('MEDIUM: Moderate memory usage.');
+        recommendations.push('Consider using delta_only snapshots to reduce data transfer.');
+        break;
+      default:
+        recommendations.push('LOW: Memory usage normal.');
+    }
+
+    return recommendations;
   }
 
   private async handleElementSearch(args: {
@@ -1526,6 +1925,7 @@ class McpServer {
     this.logStructured('browser_restart_requested', {
       reason: args.reason,
       timestamp: new Date().toISOString(),
+      memory_before: this.getMemoryUsage(),
     });
 
     // Close existing sessions
@@ -1536,6 +1936,10 @@ class McpServer {
     // Close browser
     await this.browserCore.close().catch(() => undefined);
 
+    // ============================================================
+    // FULL MEMORY CLEANUP ON RESTART
+    // ============================================================
+
     // Reset state - clear all components
     this.activeSessionId = null;
     this.initialized = false;
@@ -1544,6 +1948,17 @@ class McpServer {
     this.rateLimits.clear();
     this.requestCache.clear();
     this.screenshotCache.clear();
+    this.sseConnections.clear();
+    this.logBuffer = [];
+
+    // Clear semantic layer caches
+    try {
+      const { globalSemCache } = await import('../cache/Sem');
+      globalSemCache.clear();
+      this.logStructured('semantic_cache_cleared', {});
+    } catch {
+      // Cache module may not be available
+    }
 
     // Re-initialize browser
     await this.browserCore.initialize();
@@ -1552,6 +1967,17 @@ class McpServer {
     // Re-create actionExecutor (it holds ref to browserCore)
     this.actionExecutor = new ActionExecutor(this.browserCore);
     this.browserRestartAttempts = 0;
+
+    // Reset memory pressure
+    this.memoryPressureLevel = 'low';
+
+    // Trigger garbage collection
+    this.triggerGarbageCollection();
+
+    this.logStructured('browser_restart_complete', {
+      memory_after: this.getMemoryUsage(),
+      timestamp: new Date().toISOString(),
+    });
 
     return {
       content: [
@@ -1786,6 +2212,9 @@ class McpServer {
       case 'browser_snapshot':
         return this.snapshotRateLimit;
       case 'browser_action':
+      case 'browser_run_flow':
+      case 'browser_evaluate':
+      case 'browser_visual':
         return this.actionRateLimit;
       default:
         return this.actionRateLimit;
@@ -1800,6 +2229,11 @@ class McpServer {
         return this.actionTimeoutMs;
       case 'browser_action':
         return this.actionTimeoutMs;
+      case 'browser_run_flow':
+        return 120000;
+      case 'browser_evaluate':
+      case 'browser_visual':
+        return this.snapshotTimeoutMs;
       case 'browser_paginate':
         return 120000; // 2 minutes for pagination
       default:
@@ -2061,10 +2495,12 @@ class McpServer {
   // SNAPSHOT HELPERS
   // ============================================================================
 
-  private async getQuickSnapshot(sessionId: string): Promise<any> {
+  private async getQuickSnapshot(sessionId: string, options: any = {}): Promise<any> {
     const page = this.browserCore.getPage(sessionId);
     const tabs = await this.browserCore.listTabs(sessionId);
     const tabId = this.browserCore.getActiveTabId(sessionId);
+    const previousSnapshot = options.previousSnapshot ?? this.lastSnapshots.get(sessionId);
+    const bouncer = await this.bouncer.dismiss(page, { enabled: options.auto_bounce !== false }).catch(() => undefined);
 
     const snapshot = await this.semanticLayer.createSnapshot(page, {
       session: {
@@ -2075,7 +2511,18 @@ class McpServer {
         cookies_count: 0,
       },
       maxElements: 300, // Limited for speed
+      previousSnapshot,
+      ...this.snapshotFilters(options),
     });
+    if (bouncer && snapshot.meta) {
+      snapshot.meta.bouncer = {
+        attempted: bouncer.attempted,
+        closed: bouncer.closed,
+        duration_ms: bouncer.duration_ms,
+        actions: bouncer.actions,
+      };
+    }
+    this.lastSnapshots.set(sessionId, snapshot);
 
     return this.stripInternalFields(snapshot);
   }
@@ -2097,6 +2544,26 @@ class McpServer {
       ...snapshot,
       elements: (snapshot.elements || []).slice(0, maxElements),
     };
+  }
+
+  private snapshotFilters(args: any): {
+    actionableOnly?: boolean;
+    affordances?: string[];
+    includeTypes?: string[];
+    excludeTypes?: string[];
+  } {
+    return {
+      actionableOnly: Boolean(args.actionable_only ?? args.actionableOnly),
+      affordances: this.stringArray(args.affordances),
+      includeTypes: this.stringArray(args.include_types ?? args.includeTypes),
+      excludeTypes: this.stringArray(args.exclude_types ?? args.excludeTypes),
+    };
+  }
+
+  private stringArray(value: unknown): string[] | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (Array.isArray(value)) return value.map(String).filter(Boolean);
+    return String(value).split(',').map((entry) => entry.trim()).filter(Boolean);
   }
 
   // ============================================================================
@@ -2269,6 +2736,263 @@ class McpServer {
   // ============================================================================
   // METRICS
   // ============================================================================
+
+  // ============================================================
+  // MEMORY MANAGEMENT - Multi-level Cleanup Strategy
+  // ============================================================
+
+  /**
+   * Check if a tool is a rescue tool (system tool that bypasses resource limits)
+   */
+  private isRescueTool(name: string): boolean {
+    return this.RESCUE_TOOLS.has(name);
+  }
+
+  /**
+   * Force garbage collection hint to Node.js
+   * This is a hint, not a guarantee - Node will decide if GC is needed
+   */
+  private triggerGarbageCollection(): void {
+    const now = Date.now();
+    if (now - this.lastGcTimestamp < this.gcCooldownMs) {
+      return; // Too soon, respect cooldown
+    }
+
+    this.lastGcTimestamp = now;
+
+    // Request GC by dereferencing large objects
+    // This is a soft hint - Node.js may or may not run GC
+    if (global.gc) {
+      try {
+        global.gc(true); // Explicit GC if available
+      } catch {
+        // GC not exposed, ignore
+      }
+    }
+
+    this.logStructured('gc_triggered', {
+      memory_before: this.getMemoryUsage(),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * Get current memory usage in bytes
+   */
+  private getMemoryUsage(): { rss: number; heapUsed: number; heapTotal: number } {
+    const mem = process.memoryUsage();
+    return {
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+    };
+  }
+
+  /**
+   * Assess current memory pressure level
+   */
+  private assessMemoryPressure(): 'low' | 'medium' | 'high' | 'critical' {
+    const mem = process.memoryUsage();
+    const heapUsed = mem.heapUsed;
+
+    if (heapUsed >= this.memoryThresholds.critical) {
+      return 'critical';
+    } else if (heapUsed >= this.memoryThresholds.warning) {
+      return 'high';
+    } else if (heapUsed >= this.memoryThresholds.warning / 2) {
+      return 'medium';
+    }
+    return 'low';
+  }
+
+  /**
+   * Level 1 Cleanup - Light (no restart required)
+   * Clear caches and non-essential data
+   */
+  private level1Cleanup(): void {
+    this.logStructured('memory_cleanup_level1', {
+      memory_before: this.getMemoryUsage(),
+    });
+
+    // Clear screenshot cache
+    this.screenshotCache.clear();
+
+    // Clear request deduplication cache
+    this.requestCache.clear();
+
+    // Clear rate limits (they'll rebuild naturally)
+    this.rateLimits.clear();
+
+    // Clear old log buffer
+    this.logBuffer = [];
+
+    this.memoryPressureLevel = 'medium';
+
+    this.logStructured('memory_cleanup_level1_complete', {
+      memory_after: this.getMemoryUsage(),
+    });
+  }
+
+  /**
+   * Level 2 Cleanup - Medium (close sessions but keep browser)
+   * Aggressive cache clearing and session cleanup
+   */
+  private level2Cleanup(): void {
+    this.logStructured('memory_cleanup_level2', {
+      memory_before: this.getMemoryUsage(),
+    });
+
+    // Level 1 cleanup first
+    this.level1Cleanup();
+
+    // Clear all snapshots
+    this.lastSnapshots.clear();
+
+    // Clear SSE connections
+    this.sseConnections.clear();
+
+    // Close all sessions (but keep browser open)
+    const sessionIds = Array.from(this.sessions.keys());
+    for (const sessionId of sessionIds) {
+      this.browserCore.closeSession(sessionId).catch(() => undefined);
+    }
+    this.sessions.clear();
+    this.activeSessionId = null;
+    this.initialized = false;
+
+    // Trigger GC
+    this.triggerGarbageCollection();
+
+    this.memoryPressureLevel = 'high';
+
+    this.logStructured('memory_cleanup_level2_complete', {
+      memory_after: this.getMemoryUsage(),
+    });
+  }
+
+  /**
+   * Level 3 Cleanup - Deep (full restart)
+   * Complete browser restart with full state reset
+   */
+  private async level3Cleanup(): Promise<void> {
+    this.logStructured('memory_cleanup_level3', {
+      memory_before: this.getMemoryUsage(),
+    });
+
+    // Full browser restart
+    await this.handleRestart({ reason: 'memory_cleanup' });
+
+    this.triggerGarbageCollection();
+
+    this.memoryPressureLevel = 'low';
+
+    this.logStructured('memory_cleanup_level3_complete', {
+      memory_after: this.getMemoryUsage(),
+    });
+  }
+
+  /**
+   * Smart cleanup based on current memory pressure
+   * Returns true if cleanup was performed
+   */
+  private async performSmartCleanup(): Promise<boolean> {
+    this.memoryPressureLevel = this.assessMemoryPressure();
+
+    switch (this.memoryPressureLevel) {
+      case 'critical':
+        this.logStructured('memory_pressure_critical', {
+          memory: this.getMemoryUsage(),
+        });
+        await this.level3Cleanup();
+        return true;
+
+      case 'high':
+        this.logStructured('memory_pressure_high', {
+          memory: this.getMemoryUsage(),
+        });
+        this.level2Cleanup();
+        return true;
+
+      case 'medium':
+        this.level1Cleanup();
+        return true;
+
+      default:
+        return false; // No cleanup needed
+    }
+  }
+
+  /**
+   * Get adaptive max elements based on memory pressure
+   */
+  private getAdaptiveMaxElements(requested?: number): number {
+    const base = requested || 500;
+
+    switch (this.memoryPressureLevel) {
+      case 'critical':
+        return this.memoryThresholds.maxElementsHardLimit;
+      case 'high':
+        return Math.min(base, this.memoryThresholds.maxElementsSoftLimit);
+      default:
+        return base;
+    }
+  }
+
+  /**
+   * Detect if a site is "heavy" (complex DOM, ad-heavy, etc.)
+   * These sites need special handling to avoid memory issues
+   */
+  private isHeavySite(url: string): boolean {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+
+      // Known heavy e-commerce sites with complex DOM
+      const heavyPatterns = [
+        'amazon.',
+        'ebay.',
+        'walmart.',
+        'target.',
+        'bestbuy.',
+        'alibaba.',
+        'aliexpress.',
+        'rakuten.',
+        'yahoo.',
+        'aol.',
+        'msn.',
+        'bing.',
+        'cnn.',
+        'bbc.',
+        'forbes.',
+        'huffpost.',
+        'reddit.',
+        'instagram.',
+        'facebook.',
+        'twitter.',
+        'tiktok.',
+        'youtube.',
+        'pinterest.',
+        'linkedin.',
+        'tumblr.',
+        'wikihow.',
+        'zhihu.',
+        'baidu.',
+        'sina.',
+        'qq.',
+        'naver.',
+        'daum.',
+      ];
+
+      for (const pattern of heavyPatterns) {
+        if (hostname.includes(pattern)) {
+          return true;
+        }
+      }
+
+      return false;
+    } catch {
+      return false;
+    }
+  }
 
   private getPrometheusMetrics(): string {
     const uptime = Math.round((Date.now() - this.serverStartTime) / 1000);

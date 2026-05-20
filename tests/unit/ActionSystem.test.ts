@@ -1,6 +1,7 @@
 import { Browser, chromium, Page } from 'playwright';
 import { ActionExecutor } from '../../src/layer2_action_execution/ActionExecutor';
 import { globalEventBus } from '../../src/common/EventBus';
+import { Bouncer } from '../../src/layer2_action_execution/Bouncer';
 
 jest.setTimeout(30000);
 
@@ -155,5 +156,71 @@ describe('Declarative action system', () => {
     });
 
     expect(result.data).toEqual(expect.objectContaining({ matched: true }));
+  });
+
+  it('executes zero-shot semantic click and type without a prior snapshot', async () => {
+    await page!.setContent(`
+      <label>Search <input id="search"></label>
+      <button onclick="document.getElementById('status').textContent = document.getElementById('search').value">
+        Add to Cart
+      </button>
+      <p id="status">idle</p>
+    `);
+
+    await executor.executeAction('session', 'type', undefined, {
+      target_semantic: 'input with label "Search"',
+      text: 'headphones',
+    });
+    await executor.executeAction('session', 'click', undefined, {
+      target_semantic: 'button with text "Add to Cart"',
+    });
+
+    await expect(page!.locator('#status').textContent()).resolves.toBe('headphones');
+  });
+
+  it('evaluates read-only snippets and blocks obvious mutations by default', async () => {
+    await page!.setContent('<span class="price">$19.99</span>');
+
+    const result = await executor.executeAction('session', 'evaluate', undefined, {
+      script: "document.querySelector('.price')?.textContent",
+    });
+
+    expect(result.data).toEqual(expect.objectContaining({ result: '$19.99', read_only: true }));
+    await expect(executor.executeAction('session', 'evaluate', undefined, {
+      script: "document.querySelector('.price').textContent = '$0'",
+    })).rejects.toMatchObject({ code: 'SECURITY_VIOLATION' });
+  });
+
+  it('supports discovered convenience form/input actions', async () => {
+    await page!.setContent(`
+      <form id="profile">
+        <input id="agree" type="checkbox">
+        <input id="name" value="old">
+      </form>
+    `);
+
+    await executor.executeAction('session', 'check', 'agree', { checked: true });
+    await executor.executeAction('session', 'clear', 'name');
+    await executor.executeAction('session', 'append', 'name', { text: 'new' });
+    const validation = await executor.executeAction('session', 'validate_form', 'profile');
+
+    await expect(page!.locator('#agree').isChecked()).resolves.toBe(true);
+    await expect(page!.locator('#name').inputValue()).resolves.toBe('new');
+    expect(validation.data).toEqual(expect.objectContaining({ valid: true }));
+  });
+
+  it('bounces safe cookie popups before extraction', async () => {
+    await page!.setContent(`
+      <main><button id="buy">Buy</button></main>
+      <div role="dialog" class="cookie-modal" style="position:fixed;inset:0;background:white">
+        <p>We use cookies for analytics.</p>
+        <button id="accept">Accept all</button>
+      </div>
+    `);
+
+    const result = await new Bouncer().dismiss(page!);
+
+    expect(result.closed).toBe(1);
+    expect(result.actions[0]).toEqual(expect.objectContaining({ text: 'Accept all' }));
   });
 });

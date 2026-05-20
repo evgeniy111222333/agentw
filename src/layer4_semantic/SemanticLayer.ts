@@ -24,6 +24,10 @@ export interface SnapshotBuildOptions {
   session: SessionInfo;
   maxElements?: number;
   snapshotMode?: 'compact' | 'standard' | 'detailed';
+  actionableOnly?: boolean;
+  affordances?: string[];
+  includeTypes?: string[];
+  excludeTypes?: string[];
   pageLoadTime?: number;
   actionTime?: number;
   totalTime?: number;
@@ -71,12 +75,13 @@ export class SemanticLayer {
 
   async createSnapshot(page: Page, options: SnapshotBuildOptions): Promise<SemanticSnapshot> {
     const extractionStart = performance.now();
+    const filteredView = hasSnapshotFilters(options);
 
     // Concept §3.7.1: True incremental fast-path.
     // If IncrementalUpdater has a snapshot patched via EventBus (form_state_updated,
     // dom_mutated) AND StateReconciler confirms the page hasn't drifted, we can
     // skip stabilization + DOM traversal entirely — 0ms extraction.
-    if (!options.forceRefresh) {
+    if (!options.forceRefresh && !filteredView) {
       const incremental = this.incrementalUpdater.getSnapshot(options.session.session_id);
       if (incremental) {
         if (!options.previousSnapshot) {
@@ -116,13 +121,13 @@ export class SemanticLayer {
     await this.stabilizePage(page);
     try {
       const snap = await this.createSnapshotOnce(page, options, extractionStart);
-      this.incrementalUpdater.registerSession(options.session.session_id, page, snap);
+      if (!filteredView) this.incrementalUpdater.registerSession(options.session.session_id, page, snap);
       return snap;
     } catch (error) {
       if (!isNavigationContextError(error)) throw error;
       await this.stabilizePage(page, true);
       const snap = await this.createSnapshotOnce(page, options, extractionStart);
-      this.incrementalUpdater.registerSession(options.session.session_id, page, snap);
+      if (!filteredView) this.incrementalUpdater.registerSession(options.session.session_id, page, snap);
       return snap;
     }
   }
@@ -144,6 +149,7 @@ export class SemanticLayer {
             config.adaptive_max_elements ? 'adaptive' : 'fixed',
             config.max_elements_hard_limit,
             viewSignature(options.session.viewport),
+            snapshotFilterSignature(options),
           ].join(':'),
         }
       : undefined;
@@ -208,13 +214,25 @@ export class SemanticLayer {
     elements = pluginResult.elements;
     availableActions = pluginResult.available_actions;
 
+    const filterResult = applySnapshotFilter(elements, availableActions, options);
+    elements = filterResult.elements;
+    availableActions = filterResult.availableActions;
+
+    // Apply Token Budget (Concept 2.7)
+    const budgetConfig = ConfigurationManager.getInstance().getConfig().semantic.token_budget;
+    const budgetResult = this.tokenBudgetManager.applyBudget(elements, {
+      max_tokens: budgetConfig?.max_tokens,
+    });
+    elements = budgetResult.elements;
+    availableActions = filterActionsToElements(availableActions, elements);
+
     const snapshot: SemanticSnapshot = {
       snapshot_id: randomUUID(),
       version: '2.2.0',
       url: page.url(),
       title,
       timestamp,
-      elements: [], // Replaced below after budgeting
+      elements,
       available_actions: availableActions,
       session: options.session,
       forms: collectForms(elements),
@@ -225,13 +243,6 @@ export class SemanticLayer {
     recordAuthMetrics(snapshot.auth.authenticated);
     const privacy = maskSnapshot(snapshot);
 
-    // Apply Token Budget (Concept 2.7)
-    const budgetConfig = ConfigurationManager.getInstance().getConfig().semantic.token_budget;
-    const budgetResult = this.tokenBudgetManager.applyBudget(elements, {
-      max_tokens: budgetConfig?.max_tokens,
-    });
-    snapshot.elements = budgetResult.elements;
-
     const extractionTime = Math.round(performance.now() - extractionStart);
     const meta: SnapshotMeta = {
       page_load_time: options.pageLoadTime,
@@ -239,7 +250,7 @@ export class SemanticLayer {
       total_time: options.totalTime,
       extraction_time: extractionTime,
       dom_nodes_count: traversal.stats.dom_nodes_count,
-      semantic_nodes_count: elements.length,
+      semantic_nodes_count: snapshot.elements.length,
       semantic_nodes_total: traversal.stats.semantic_nodes_total,
       max_elements: traversal.stats.max_elements,
       max_elements_requested: traversal.stats.max_elements_requested,
@@ -274,6 +285,7 @@ export class SemanticLayer {
         pruning_applied: budgetResult.pruning_applied,
       },
       privacy,
+      filter: filterResult.meta,
     };
 
     snapshot.meta = dropUndefined(meta);
@@ -396,6 +408,148 @@ export class SemanticLayer {
       mutationQuietMs: 300,
     });
   }
+}
+
+function hasSnapshotFilters(options: SnapshotBuildOptions): boolean {
+  return Boolean(
+    options.actionableOnly ||
+    options.affordances?.length ||
+    options.includeTypes?.length ||
+    options.excludeTypes?.length
+  );
+}
+
+function snapshotFilterSignature(options: SnapshotBuildOptions): string {
+  if (!hasSnapshotFilters(options)) return 'all';
+  return JSON.stringify({
+    actionableOnly: Boolean(options.actionableOnly),
+    affordances: normalizeList(options.affordances),
+    includeTypes: normalizeList(options.includeTypes),
+    excludeTypes: normalizeList(options.excludeTypes),
+  });
+}
+
+function applySnapshotFilter(
+  elements: SemanticElement[],
+  availableActions: SemanticSnapshot['available_actions'],
+  options: SnapshotBuildOptions
+): {
+  elements: SemanticElement[];
+  availableActions: SemanticSnapshot['available_actions'];
+  meta?: SnapshotMeta['filter'];
+} {
+  if (!hasSnapshotFilters(options)) {
+    return { elements, availableActions };
+  }
+
+  const includeTypes = new Set(normalizeList(options.includeTypes));
+  const excludeTypes = new Set(normalizeList(options.excludeTypes));
+  const affordances = new Set(normalizeList(options.affordances));
+  const actionableTargets = new Set(
+    availableActions
+      .filter((action) => action.action !== 'scroll_to_element')
+      .map((action) => action.target)
+      .filter(Boolean) as string[]
+  );
+  const parentIds = new Set<string>();
+  const keepIds = new Set<string>();
+
+  const keep = (element: SemanticElement): boolean => {
+    const type = String(element.type);
+    if (excludeTypes.has(type)) return false;
+    if (includeTypes.size > 0 && includeTypes.has(type)) return true;
+    if (options.actionableOnly && isActionableSnapshotElement(element, actionableTargets)) return true;
+    if (affordances.size > 0 && matchesAffordance(element, availableActions, affordances)) return true;
+    if (!options.actionableOnly && includeTypes.size === 0 && affordances.size === 0) return true;
+    return false;
+  };
+
+  for (const element of elements) {
+    if (!keep(element)) continue;
+    keepIds.add(element.id);
+    if (element.parent_id) parentIds.add(element.parent_id);
+  }
+
+  // Preserve a thin amount of semantic context around actionable controls.
+  for (const element of elements) {
+    if (parentIds.has(element.id) && ['form', 'card', 'article', 'navigation', 'modal', 'dialog', 'menu'].includes(element.type)) {
+      keepIds.add(element.id);
+    }
+    if (options.actionableOnly && isCompactContext(element)) {
+      keepIds.add(element.id);
+    }
+  }
+
+  const filteredElements = elements.filter((element) => keepIds.has(element.id));
+  const filteredActions = filterActionsToElements(availableActions, filteredElements);
+  return {
+    elements: filteredElements,
+    availableActions: filteredActions,
+    meta: {
+      actionable_only: options.actionableOnly || undefined,
+      affordances: normalizeList(options.affordances),
+      include_types: normalizeList(options.includeTypes),
+      exclude_types: normalizeList(options.excludeTypes),
+      before_elements: elements.length,
+      after_elements: filteredElements.length,
+      before_actions: availableActions.length,
+      after_actions: filteredActions.length,
+      dropped_elements: Math.max(0, elements.length - filteredElements.length),
+    },
+  };
+}
+
+function filterActionsToElements(
+  actions: SemanticSnapshot['available_actions'],
+  elements: SemanticElement[]
+): SemanticSnapshot['available_actions'] {
+  const elementIds = new Set(elements.map((element) => element.id));
+  return actions.filter((action) => !action.target || elementIds.has(action.target));
+}
+
+function isActionableSnapshotElement(element: SemanticElement, actionableTargets: Set<string>): boolean {
+  if (actionableTargets.has(element.id)) return true;
+  if ([
+    'button', 'link', 'input', 'textarea', 'select', 'form', 'menu', 'menu_item',
+    'pagination', 'tab_group', 'accordion', 'carousel', 'iframe', 'embed', 'video', 'audio',
+  ].includes(element.type)) return true;
+  if (['heading', 'card', 'article', 'table', 'list', 'chart', 'notification', 'modal', 'dialog', 'breadcrumb'].includes(element.type)) {
+    return hasUsefulText(element);
+  }
+  return false;
+}
+
+function matchesAffordance(
+  element: SemanticElement,
+  actions: SemanticSnapshot['available_actions'],
+  affordances: Set<string>
+): boolean {
+  const elementActions = actions.filter((action) => action.target === element.id).map((action) => action.action);
+  const hasAction = (...names: string[]) => names.some((name) => elementActions.includes(name));
+  if ((affordances.has('click') || affordances.has('clickable')) && (hasAction('click', 'interact') || ['button', 'menu_item', 'accordion', 'carousel', 'tab_group'].includes(element.type))) return true;
+  if ((affordances.has('navigate') || affordances.has('navigable')) && (hasAction('navigate') || ['link', 'breadcrumb', 'pagination', 'navigation'].includes(element.type))) return true;
+  if ((affordances.has('type') || affordances.has('fillable') || affordances.has('input')) && (hasAction('type', 'fill_form') || ['input', 'textarea', 'form'].includes(element.type))) return true;
+  if ((affordances.has('select') || affordances.has('selectable')) && (hasAction('select') || element.type === 'select' || ['checkbox', 'radio'].includes(String(element.input_type)))) return true;
+  if ((affordances.has('submit') || affordances.has('submittable')) && (hasAction('submit', 'fill_form') || element.type === 'form')) return true;
+  if (affordances.has('media') && (hasAction('media_control', 'interact') || ['video', 'audio', 'embed', 'iframe'].includes(element.type))) return true;
+  if ((affordances.has('read') || affordances.has('readable') || affordances.has('text')) && ['heading', 'text', 'article', 'card', 'table', 'list', 'chart'].includes(element.type)) return true;
+  if (affordances.has('visible') && element.visible !== false) return true;
+  return false;
+}
+
+function isCompactContext(element: SemanticElement): boolean {
+  if (!hasUsefulText(element)) return false;
+  if (['heading', 'card', 'article', 'breadcrumb', 'pagination', 'notification', 'modal', 'dialog', 'chart'].includes(element.type)) return true;
+  const text = String(element.text ?? element.label ?? element.title ?? '').trim();
+  return /\$|€|£|¥|uah|usd|price|total|title|product|result|error|warning/i.test(text) && text.length <= 180;
+}
+
+function hasUsefulText(element: SemanticElement): boolean {
+  return Boolean(String(element.text ?? element.label ?? element.title ?? element.data_summary ?? '').trim());
+}
+
+function normalizeList(value: string[] | undefined): string[] {
+  return [...new Set((value ?? []).map((entry) => String(entry).trim().toLowerCase()).filter(Boolean))];
 }
 
 function collectForms(elements: SemanticElement[]): any[] | undefined {

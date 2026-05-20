@@ -16,12 +16,18 @@ import {
 
 export type BrowserAction =
   | 'click'
+  | 'check'
+  | 'clear'
+  | 'clear_form'
+  | 'clear_search'
+  | 'append'
   | 'fill_form'
   | 'fill_and_verify'
   | 'go_back'
   | 'go_forward'
   | 'hover'
   | 'interact'
+  | 'evaluate'
   | 'if'
   | 'invalidate_cache'
   | 'keyboard'
@@ -36,12 +42,19 @@ export type BrowserAction =
   | 'parallel'
   | 'poll'
   | 'refresh'
+  | 'reset_form'
   | 'screenshot'
   | 'search_and_paginate'
   | 'scroll'
   | 'scroll_to_element'
   | 'select'
+  | 'select_all'
   | 'sequence'
+  | 'run_flow'
+  | 'browser_run_flow'
+  | 'set_color'
+  | 'set_date'
+  | 'set_value'
   | 'set_viewport'
   | 'snapshot'
   | 'submit'
@@ -60,6 +73,8 @@ export type BrowserAction =
   | 'list_tabs'
   | 'close_tab'
   | 'upload'
+  | 'validate_form'
+  | 'visual'
   | 'define_script'
   | 'call_script'
   | 'try'
@@ -247,6 +262,7 @@ export interface ImportSessionResponse {
 
 export interface ExecuteActionOptions {
   target_id?: string;
+  target_semantic?: string | Record<string, any>;
   params?: ActionParam;
   trace_id?: string;
 }

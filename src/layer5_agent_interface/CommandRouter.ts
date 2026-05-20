@@ -15,11 +15,13 @@ import { OpStart, OpStatus, OpStore } from '../op/Op';
 import { globalTraceStore } from '../trace/Trace';
 import { activeTab, snapKey } from '../session/Tabs';
 import { ConfigurationManager } from '../config/ConfigurationManager';
+import { Bouncer } from '../layer2_action_execution/Bouncer';
 
 export interface AgentCommand {
   action: string;
   session_id: string;
   target_id?: string;
+  target_semantic?: string | Record<string, any>;
   action_params?: Record<string, any>;
   trace_id?: string;
 }
@@ -66,6 +68,14 @@ interface ResolvedAction {
 
 const actionSchemas: Record<string, ActionSchema> = {
   click: { target: 'required', retryable: true },
+  check: { target: 'required', retryable: true },
+  clear: { target: 'required', retryable: true },
+  clear_search: { target: 'required', retryable: true },
+  append: { target: 'required', requiredParams: ['text'], retryable: true },
+  select_all: { target: 'required', retryable: true },
+  set_value: { target: 'required', requiredParams: ['value'], retryable: true },
+  set_color: { target: 'required', retryable: true },
+  set_date: { target: 'required', requiredParams: ['value'], retryable: true },
   go_back: { target: 'none', retryable: true },
   go_forward: { target: 'none', retryable: true },
   hover: { target: 'required', retryable: true },
@@ -84,6 +94,7 @@ const actionSchemas: Record<string, ActionSchema> = {
   },
   refresh: { target: 'none', retryable: true },
   screenshot: { target: 'optional', retryable: true },
+  visual: { target: 'none', retryable: true },
   screenshot_file: { target: 'optional', retryable: true },
   screenshot_to_file: { target: 'optional', retryable: true },
   pdf: { target: 'none', retryable: true },
@@ -112,6 +123,14 @@ const actionSchemas: Record<string, ActionSchema> = {
     target: 'none',
     validate: validateFsParams,
   },
+  evaluate: {
+    target: 'none',
+    validate: (params) => {
+      if (params.script === undefined && params.expression === undefined && params.javascript === undefined) {
+        throw new LlmBrowserError('MISSING_PARAM', 'evaluate requires script or expression');
+      }
+    },
+  },
   fill_form: {
     target: 'optional',
     requiredParams: ['fields'],
@@ -121,6 +140,9 @@ const actionSchemas: Record<string, ActionSchema> = {
       }
     },
   },
+  reset_form: { target: 'required', retryable: true },
+  clear_form: { target: 'required', retryable: true },
+  validate_form: { target: 'required', retryable: true },
   if: { target: 'none', requiredParams: ['condition'] },
   invalidate_cache: { target: 'none' },
   loop: {
@@ -168,6 +190,22 @@ const actionSchemas: Record<string, ActionSchema> = {
     target: 'none',
     validate: (params) => {
       if (!Array.isArray(params.steps)) throw new LlmBrowserError('MISSING_PARAM', 'sequence steps are required');
+    },
+  },
+  run_flow: {
+    target: 'none',
+    validate: (params) => {
+      if (!Array.isArray(params.steps ?? params.actions ?? params.flow)) {
+        throw new LlmBrowserError('MISSING_PARAM', 'run_flow steps are required');
+      }
+    },
+  },
+  browser_run_flow: {
+    target: 'none',
+    validate: (params) => {
+      if (!Array.isArray(params.steps ?? params.actions ?? params.flow)) {
+        throw new LlmBrowserError('MISSING_PARAM', 'browser_run_flow steps are required');
+      }
     },
   },
   submit: { target: 'required', retryable: true },
@@ -220,7 +258,8 @@ export class CommandRouter {
     private securityPolicy = new SecurityPolicy(stateManager),
     private ops = new OpStore<CommandResult>(),
     private actionValidator = new ActionValidator(),
-    private stateReconciler = new StateReconciler()
+    private stateReconciler = new StateReconciler(),
+    private bouncer = new Bouncer()
   ) {}
 
   async execute(command: AgentCommand): Promise<RouterResult> {
@@ -347,7 +386,10 @@ export class CommandRouter {
     const requestStart = performance.now();
     const traceId = preflight?.traceId ?? command.trace_id ?? randomUUID();
     const actionId = randomUUID();
-    const params = command.action_params ?? {};
+    const params = {
+      ...(command.action_params ?? {}),
+      ...(command.target_semantic !== undefined ? { target_semantic: command.target_semantic } : {}),
+    };
     const action = command.action;
     const requestedAt = new Date().toISOString();
     let securityDecision: ReturnType<SecurityPolicy['authorize']> = {};
@@ -447,6 +489,12 @@ export class CommandRouter {
       if (typeof (this.stateManager as any).injectAllTrackers === 'function') {
         await this.stateManager.injectAllTrackers(page, command.session_id).catch(() => undefined);
       }
+      const bouncerResult = await this.traceAsync(
+        traceId,
+        'bouncer.dismiss',
+        { enabled: activeAction.params.auto_bounce !== false },
+        () => this.bouncer.dismiss(page, { enabled: activeAction.params.auto_bounce !== false })
+      ).catch(() => undefined);
       const active = activeTab(this.stateManager.getSessionState(command.session_id));
       let previousSnapshot = active ? this.previousSnapshots.get(snapKey(command.session_id, active.tab_id)) : undefined;
 
@@ -474,11 +522,20 @@ export class CommandRouter {
           previousSnapshot,
           session: this.createSessionInfo(command.session_id),
           maxElements: snapshotMaxElements(activeAction.params),
+          ...snapshotFilterOptions(activeAction.params),
           actionTime: execution?.duration_ms ?? 0,
           totalTime: Math.round(performance.now() - requestStart),
           traceId,
         })
       );
+      if (bouncerResult && snapshot.meta) {
+        snapshot.meta.bouncer = {
+          attempted: bouncerResult.attempted,
+          closed: bouncerResult.closed,
+          duration_ms: bouncerResult.duration_ms,
+          actions: bouncerResult.actions,
+        };
+      }
 
       if (activeAction.executionAction === 'close_tab' && execution?.data?.closed_tab_id) {
         this.previousSnapshots.delete(snapKey(command.session_id, String(execution.data.closed_tab_id)));
@@ -677,11 +734,16 @@ export class CommandRouter {
       actionParams.target_id ??
       actionParams.form_id ??
       actionParams.search_input_id;
+    const targetSemantic = params?.target_semantic ?? actionParams.target_semantic ?? params?.semantic_target ?? actionParams.semantic_target;
     return {
       action: method,
       session_id: params?.session_id,
       target_id: targetId,
-      action_params: stripRoutingParams(actionParams),
+      target_semantic: targetSemantic,
+      action_params: stripRoutingParams({
+        ...actionParams,
+        ...(targetSemantic !== undefined ? { target_semantic: targetSemantic } : {}),
+      }),
       trace_id: params?.trace_id,
     };
   }
@@ -695,11 +757,16 @@ export class CommandRouter {
       actionParams.target_id ??
       actionParams.form_id ??
       actionParams.search_input_id;
+    const targetSemantic = body?.target_semantic ?? actionParams.target_semantic ?? body?.semantic_target ?? actionParams.semantic_target;
     return {
       action: body?.action,
       session_id: sessionId,
       target_id: targetId,
-      action_params: stripRoutingParams(actionParams),
+      target_semantic: targetSemantic,
+      action_params: stripRoutingParams({
+        ...actionParams,
+        ...(targetSemantic !== undefined ? { target_semantic: targetSemantic } : {}),
+      }),
       trace_id: body?.trace_id,
     };
   }
@@ -718,13 +785,36 @@ export class CommandRouter {
       throw new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found', { session_id: command.session_id });
     }
 
+    if (command.action === 'run_flow' || command.action === 'browser_run_flow') {
+      const params: Record<string, any> = {
+        ...(command.action_params ?? {}),
+        ...(command.target_semantic !== undefined ? { target_semantic: command.target_semantic } : {}),
+      };
+      const steps = params.steps ?? params.actions ?? params.flow;
+      const resolved = {
+        schema: actionSchemas.sequence,
+        executionAction: 'sequence',
+        targetId: undefined,
+        params: {
+          ...params,
+          steps,
+        },
+      };
+      this.validateAgainstSchema(command.action, actionSchemas[command.action], undefined, params);
+      this.validateAgainstSchema('sequence', resolved.schema, resolved.targetId, resolved.params);
+      return resolved;
+    }
+
     const schema = actionSchemas[command.action];
     if (schema) {
       const resolved = {
         schema,
         executionAction: command.action,
         targetId: command.target_id,
-        params: command.action_params ?? {},
+        params: {
+          ...(command.action_params ?? {}),
+          ...(command.target_semantic !== undefined ? { target_semantic: command.target_semantic } : {}),
+        },
       };
       this.validateAgainstSchema(command.action, resolved.schema, resolved.targetId, resolved.params);
       return resolved;
@@ -780,7 +870,8 @@ export class CommandRouter {
     targetId: string | undefined,
     params: Record<string, any>
   ): void {
-    if (schema.target === 'required' && !targetId) {
+    const hasSemanticTarget = params.target_semantic !== undefined || params.semantic_target !== undefined || params.selector !== undefined;
+    if (schema.target === 'required' && !targetId && !hasSemanticTarget) {
       throw new LlmBrowserError('MISSING_PARAM', `target_id is required for ${action}`);
     }
 
@@ -956,4 +1047,25 @@ function snapshotMaxElements(params: Record<string, any>): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function snapshotFilterOptions(params: Record<string, any>): {
+  actionableOnly?: boolean;
+  affordances?: string[];
+  includeTypes?: string[];
+  excludeTypes?: string[];
+} {
+  const snapshot = params.snapshot ?? {};
+  return {
+    actionableOnly: Boolean(params.actionable_only ?? params.actionableOnly ?? snapshot.actionable_only ?? snapshot.actionableOnly),
+    affordances: stringArray(params.affordances ?? snapshot.affordances),
+    includeTypes: stringArray(params.include_types ?? params.includeTypes ?? snapshot.include_types ?? snapshot.includeTypes),
+    excludeTypes: stringArray(params.exclude_types ?? params.excludeTypes ?? snapshot.exclude_types ?? snapshot.excludeTypes),
+  };
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  return String(value).split(',').map((entry) => entry.trim()).filter(Boolean);
 }

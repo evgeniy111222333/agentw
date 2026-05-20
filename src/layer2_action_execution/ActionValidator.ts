@@ -36,16 +36,27 @@ export type DegradationLevel = 'normal' | 'moderate' | 'severe';
  */
 const ACTION_PARAM_SCHEMAS: Record<string, { required?: string[]; optional?: string[] }> = {
   navigate: { required: ['url'], optional: ['wait_until', 'timeout', 'timeout_ms'] },
-  click: { optional: ['button', 'click_count', 'timeout_ms'] },
-  type: { required: ['text'], optional: ['clear', 'delay', 'press_enter', 'timeout_ms'] },
-  select: { optional: ['value', 'label', 'timeout_ms'] },
-  submit: { optional: ['timeout_ms'] },
-  hover: { optional: ['timeout_ms'] },
+  click: { optional: ['button', 'click_count', 'timeout_ms', 'target_semantic', 'selector'] },
+  check: { optional: ['checked', 'timeout_ms', 'target_semantic', 'selector'] },
+  clear: { optional: ['timeout_ms', 'target_semantic', 'selector'] },
+  clear_search: { optional: ['timeout_ms', 'target_semantic', 'selector'] },
+  append: { required: ['text'], optional: ['delay', 'timeout_ms', 'target_semantic', 'selector'] },
+  select_all: { optional: ['timeout_ms', 'target_semantic', 'selector'] },
+  set_value: { required: ['value'], optional: ['timeout_ms', 'target_semantic', 'selector'] },
+  set_color: { optional: ['value', 'color', 'timeout_ms', 'target_semantic', 'selector'] },
+  set_date: { required: ['value'], optional: ['timeout_ms', 'target_semantic', 'selector'] },
+  type: { required: ['text'], optional: ['clear', 'delay', 'press_enter', 'timeout_ms', 'target_semantic', 'selector'] },
+  select: { optional: ['value', 'label', 'timeout_ms', 'target_semantic', 'selector'] },
+  submit: { optional: ['timeout_ms', 'target_semantic', 'selector'] },
+  hover: { optional: ['timeout_ms', 'target_semantic', 'selector'] },
   scroll: { optional: ['direction', 'amount'] },
   keyboard: { required: ['key'] },
   wait: { optional: ['ms', 'timeout', 'timeout_ms', 'condition', 'element_id', 'target_id'] },
   wait_for: { required: ['condition'], optional: ['timeout_ms', 'poll_interval_ms'] },
   fill_form: { required: ['fields'], optional: ['submit', 'rollback', 'on_failure', 'timeout_ms'] },
+  reset_form: { optional: ['form_id', 'timeout_ms', 'target_semantic', 'selector'] },
+  clear_form: { optional: ['form_id', 'keep_disabled', 'timeout_ms', 'target_semantic', 'selector'] },
+  validate_form: { optional: ['form_id', 'show_errors', 'timeout_ms', 'target_semantic', 'selector'] },
   fill_and_verify: { required: ['fields'], optional: ['on_failure', 'timeout_ms'] },
   multi_click: { optional: ['element_ids', 'target_ids', 'targets', 'continue_on_error'] },
   search_and_paginate: { required: ['query'], optional: ['submit', 'max_pages', 'collect_all_pages', 'next_id'] },
@@ -61,6 +72,8 @@ const ACTION_PARAM_SCHEMAS: Record<string, { required?: string[]; optional?: str
   'try': { required: ['do'], optional: ['catch'] },
   define_script: { required: ['name', 'steps'], optional: ['params', 'parameters'] },
   call_script: { required: ['name'], optional: ['args', 'arguments', 'stop_on_error'] },
+  evaluate: { optional: ['script', 'expression', 'javascript', 'args', 'arguments', 'read_only', 'timeout_ms'] },
+  visual: { optional: ['full_page', 'show_cursor', 'timeout_ms'] },
   upload: { optional: ['file_path', 'file_paths', 'file_content', 'file_name', 'files', 'timeout_ms'] },
   download: { optional: ['url', 'file_name', 'timeout_ms'] },
   screenshot: { optional: ['full_page', 'timeout_ms'] },
@@ -69,6 +82,8 @@ const ACTION_PARAM_SCHEMAS: Record<string, { required?: string[]; optional?: str
   fs: { optional: ['operation', 'op', 'path', 'file_path', 'content', 'base64', 'encoding', 'recursive'] },
   set_viewport: { optional: ['profile', 'width', 'height'] },
   go_forward: {},
+  run_flow: { optional: ['steps', 'actions', 'flow', 'stop_on_error'] },
+  browser_run_flow: { optional: ['steps', 'actions', 'flow', 'stop_on_error'] },
   noop: {},
 };
 
@@ -142,6 +157,30 @@ export class ActionValidator {
           code: 'MISSING_PARAM',
           message: 'select requires either value or label.',
           suggestion: 'Provide params.value or params.label.',
+          context: { action },
+        },
+      };
+    }
+
+    if (action === 'set_color' && params?.value === undefined && params?.color === undefined) {
+      return {
+        valid: false,
+        error: {
+          code: 'MISSING_PARAM',
+          message: 'set_color requires value or color.',
+          suggestion: 'Provide params.value or params.color.',
+          context: { action },
+        },
+      };
+    }
+
+    if (action === 'evaluate' && params?.script === undefined && params?.expression === undefined && params?.javascript === undefined) {
+      return {
+        valid: false,
+        error: {
+          code: 'MISSING_PARAM',
+          message: 'evaluate requires script or expression.',
+          suggestion: 'Provide params.script or params.expression.',
           context: { action },
         },
       };

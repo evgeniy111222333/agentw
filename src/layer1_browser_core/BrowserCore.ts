@@ -23,8 +23,9 @@ export class BrowserCore {
   async initialize(): Promise<void> {
     const config = ConfigurationManager.getInstance().getConfig().browser;
     this.browser = await chromium.launch({
-      headless: true,
+      headless: config.headless !== false,
       executablePath: config.chromium_path,
+      slowMo: (config.slow_mo_ms ?? 0) > 0 ? config.slow_mo_ms : undefined,
       args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
     });
   }

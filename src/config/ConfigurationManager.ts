@@ -5,6 +5,8 @@ export interface BrowserConfig {
   ignore_https_errors: boolean;
   max_tabs_per_session: number;
   memory_limit_mb: number;
+  headless?: boolean;
+  slow_mo_ms?: number;
 }
 
 export interface SemanticConfig {
@@ -100,6 +102,8 @@ export class ConfigurationManager {
         ignore_https_errors: false,
         max_tabs_per_session: envNumber('LLM_BROWSER_MAX_TABS_PER_SESSION', 5),
         memory_limit_mb: envNumber('LLM_BROWSER_MEMORY_LIMIT_MB', 2048),
+        headless: envBoolean('LLM_BROWSER_HEADLESS', true),
+        slow_mo_ms: envNumber('LLM_BROWSER_SLOW_MO_MS', 0),
       },
       semantic: {
         // IMPROVED: Increased from 300 to 500 for better coverage on content-heavy sites

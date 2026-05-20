@@ -154,6 +154,27 @@ export interface SnapshotMeta {
     pruning_applied: boolean;
   };
   privacy?: PrivacyStats;
+  filter?: {
+    actionable_only?: boolean;
+    affordances?: string[];
+    include_types?: string[];
+    exclude_types?: string[];
+    before_elements: number;
+    after_elements: number;
+    before_actions: number;
+    after_actions: number;
+    dropped_elements: number;
+  };
+  bouncer?: {
+    attempted: boolean;
+    closed: number;
+    duration_ms?: number;
+    actions?: Array<{ text: string; reason: string; selector?: string }>;
+  };
+  visual?: {
+    cursor?: { x: number; y: number; action: string; updated_at: string };
+    headless?: boolean;
+  };
 }
 
 export interface PrivacyStats {

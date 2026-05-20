@@ -36,8 +36,31 @@ describe('CommandRouter', () => {
       action: 'click',
       session_id: 'session',
       target_id: 'submit',
+      target_semantic: undefined,
       action_params: { extra: true },
       trace_id: 'trace',
+    });
+  });
+
+  it('normalizes zero-shot semantic targets into action params', () => {
+    const command = router.normalizeRest('session', {
+      action: 'click',
+      target_semantic: 'button with text "Add to Cart"',
+      params: {
+        timeout_ms: 1000,
+      },
+    });
+
+    expect(command).toEqual({
+      action: 'click',
+      session_id: 'session',
+      target_id: undefined,
+      target_semantic: 'button with text "Add to Cart"',
+      action_params: {
+        timeout_ms: 1000,
+        target_semantic: 'button with text "Add to Cart"',
+      },
+      trace_id: undefined,
     });
   });
 
