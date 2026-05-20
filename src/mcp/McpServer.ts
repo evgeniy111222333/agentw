@@ -485,12 +485,14 @@ auto_bounce: {
                   'fill_form, reset_form, clear_form, validate_form, ' +
                   'check, clear, clear_search, append, set_value, set_color, set_date, ' +
                   'go_back, go_forward, refresh, ' +
-                  'screenshot, media_control, ' +
+                  'screenshot, screenshot_file, media_control, ' +
                   'open_tab, switch_tab, close_tab, set_viewport, ' +
                   'upload, download, wait, wait_for, evaluate, ' +
-                  'multi_click, sequence, parallel, loop, if, try, ' +
+                  'multi_click, sequence, parallel, loop, if, try, noop, ' +
                   'fill_and_verify, navigate_and_extract, login_flow, ' +
                   'define_script, call_script, ' +
+                  'async_navigate, poll, cancel, ' +
+                  'search_and_paginate, pdf, fs, ' +
                   'invalidate_cache, visual',
               },
               target_id: {
@@ -519,7 +521,8 @@ auto_bounce: {
                   'fill_form: {form_id, fields: {name: value}, submit: boolean} ' +
                   'scroll: {direction: "up"|"down"|"left"|"right", amount: pixels} or {mode: "auto_scroll"} ' +
                   'keyboard: {key: "Enter"|"Escape"|"Tab"|"Backspace"|"F5"|"Control+A"} ' +
-                  'screenshot: {full_page: boolean} (in-memory, see browser_screenshot for file download) ' +
+                  'screenshot: {full_page: boolean} (in-memory, see browser_screenshot) ' +
+                  'screenshot_file: {file_name: string, full_page?: boolean} (saves to /shots folder) ' +
                   'media_control: {command: "play"|"pause"|"seek", time_seconds?: number, volume?: number} ' +
                   'open_tab: {url?: string} ' +
                   'switch_tab: {tab_id: string} ' +
@@ -530,7 +533,26 @@ auto_bounce: {
                   'wait/wait_for: {condition: string, timeout_ms: number} ' +
                   'evaluate: {script: string, args?: object} ' +
                   'go_back/go_forward: {} (no params needed) ' +
-                  'refresh: {} (no params needed)',
+                  'refresh: {} (no params needed) ' +
+                  'multi_click: {clicks: [{x: number, y: number, button?: string, delay_ms?: number}]} ' +
+                  'sequence: {steps: [{action, target_id?, params?}]} ' +
+                  'parallel: {actions: [{action, target_id?, params?}]} ' +
+                  'loop: {max_iterations: number, steps: [{action, target_id?, params?}]} ' +
+                  'if: {condition: string, then_steps: [], else_steps?: []} ' +
+                  'try: {try_steps: [], catch_steps?: []} ' +
+                  'noop: {} (does nothing, useful as placeholder) ' +
+                  'fill_and_verify: {fields: {name: value}, submit?: boolean, verify_text?: string} ' +
+                  'navigate_and_extract: {url: string, extract_selector: string, wait_until?: string} ' +
+                  'login_flow: {username_field: string, password_field: string, username: string, password: string, submit_button?: string} ' +
+                  'define_script: {name: string, script: string} (define for later use) ' +
+                  'call_script: {name: string, args?: object} (call previously defined script) ' +
+                  'async_navigate: {url: string, timeout_ms?: number} (returns operation_id) ' +
+                  'poll: {operation_id: string} (check async operation status) ' +
+                  'cancel: {operation_id: string} (cancel async operation) ' +
+                  'search_and_paginate: {search_input_id?: string, query: string, submit_id?: string, next_id?: string, max_pages?: number} ' +
+                  'pdf: {file_name: string, format?: "A4"|"Letter", print_background?: boolean, landscape?: boolean, scale?: number, margin?: string} ' +
+                  'fs: {operation: "list"|"read"|"write"|"delete", path: string, content?: string, encoding?: string} ' +
+                  'invalidate_cache: {cache_key?: string} (clear specific or all caches)',
               },
               auto_snapshot: {
                 type: 'boolean',
