@@ -352,6 +352,8 @@ class McpServer {
             'TIP: For forms or search pages, combine with browser_action (type/submit) in sequence. ' +
             'TIP: After navigation, always use browser_snapshot to verify page loaded correctly. ' +
             'TIP: If navigation fails, check URL format and internet connection first. ' +
+            'TIP: For SPAs or JavaScript-heavy pages, try wait_until: "networkidle" to wait for full load. ' +
+            'TIP: Use timeout_ms to increase timeout for slow pages. ' +
             'Common use cases: Open search engine, navigate to product page, access login form.',
           inputSchema: {
             type: 'object',
@@ -359,6 +361,21 @@ class McpServer {
               url: {
                 type: 'string',
                 description: 'The URL to navigate to. Must be http:// or https:// protocol.',
+              },
+              wait_until: {
+                type: 'string',
+                enum: ['load', 'domcontentloaded', 'networkidle'],
+                description:
+                  'When to consider navigation complete: ' +
+                  '"load" (default) - wait for full page load including images/stylesheets, ' +
+                  '"domcontentloaded" - wait for DOM parsed but not subresources, ' +
+                  '"networkidle" - wait for no network requests for 500ms (best for SPAs).',
+              },
+              timeout_ms: {
+                type: 'number',
+                description:
+                  'Navigation timeout in milliseconds (default: 30000). ' +
+                  'Increase for slow pages, streaming content, or large SPAs.',
               },
             },
             required: ['url'],
@@ -434,9 +451,13 @@ class McpServer {
                 items: { type: 'string' },
                 description: 'Drop these semantic element types from the response.',
               },
-              auto_bounce: {
+auto_bounce: {
                 type: 'boolean',
-                description: 'Automatically dismiss safe cookie/newsletter/region popups before extracting (default true).',
+                description:
+                  'Automatically dismiss safe popups before extracting (default true). ' +
+                  'Dismisses: cookie consent banners, newsletter sign-up popups, region/language selectors, ' +
+                  'age verification modals, and similar non-critical overlays. ' +
+                  'TIP: Disable (false) only when you need to interact with these elements intentionally.',
               },
             },
           },
@@ -445,52 +466,71 @@ class McpServer {
         // -------------------------------------------------------------------------
         // browser_action - Execute browser actions
         // -------------------------------------------------------------------------
-        {
+{
           name: 'browser_action',
           description:
-            'Execute a browser action. Choose the right action based on what you want to achieve. ' +
+            'Execute a browser action on an element or page. This is the primary way to interact with web pages. ' +
             'TIP: First use browser_snapshot to find element IDs, then target them here. ' +
-            'TIP: click - for buttons, links, checkboxes, radio buttons. ' +
-            'TIP: type - for text inputs, textareas. Press Enter with keyboard action. ' +
-            'TIP: fill_form - for multi-field forms (more efficient than multiple type). ' +
-            'TIP: select - for dropdown selects. ' +
-            'TIP: scroll - for lazy-loaded content (use direction: down/up). ' +
-            'TIP: auto-snapshot after action will be included in response for confirmation.',
+            'TIP: target_semantic allows zero-shot targeting without prior snapshot: "button with text Submit". ' +
+            'TIP: Actions that modify DOM return an auto-snapshot (delta) for confirmation. ' +
+            'TIP: Use go_back, refresh, scroll without target_id (page-level actions).',
           inputSchema: {
             type: 'object',
             properties: {
               action: {
                 type: 'string',
                 description:
-                  'The action to execute. Actions: ' +
-                  'click, type, submit, select, hover, scroll, keyboard, ' +
-                  'fill_form, go_back, refresh, wait, screenshot, upload, download.',
+                  'The action to execute. Full list: ' +
+                  'click, type, submit, select, hover, scroll, keyboard, interact, ' +
+                  'fill_form, reset_form, clear_form, validate_form, ' +
+                  'check, clear, clear_search, append, set_value, set_color, set_date, ' +
+                  'go_back, go_forward, refresh, ' +
+                  'screenshot, media_control, ' +
+                  'open_tab, switch_tab, close_tab, set_viewport, ' +
+                  'upload, download, wait, wait_for, evaluate, ' +
+                  'multi_click, sequence, parallel, loop, if, try, ' +
+                  'fill_and_verify, navigate_and_extract, login_flow, ' +
+                  'define_script, call_script, ' +
+                  'invalidate_cache, visual',
               },
               target_id: {
                 type: 'string',
                 description:
-                  'Element ID to target (from snapshot elements array). ' +
-                  'Omit for page-level actions like go_back, refresh, scroll.',
+                  'Element ID from snapshot elements array. ' +
+                  'Omit for page-level actions: go_back, go_forward, refresh, scroll, wait, list_tabs, set_viewport.',
               },
               target_semantic: {
                 type: ['string', 'object'],
                 description:
-                  'Zero-shot target query, e.g. "button with text Add to Cart" or {type:"input", label:"Search"}. ' +
-                  'Server resolves it locally without requiring a prior snapshot.',
+                  'Zero-shot target query without needing snapshot. ' +
+                  'Examples: "button with text Add to Cart", {type:"input", label:"Email"}.',
               },
               params: {
                 type: 'object',
                 description:
-                  'Action parameters: ' +
-                  'type: {text: "value", pressEnter: boolean} ' +
-                  'fill_form: {form_id, fields: {name: value, email: value}} ' +
-                  'scroll: {direction: "down"|"up"|"left"|"right", amount: pixels} ' +
-                  'keyboard: {key: "Enter"|"Escape"|"Tab"|"Backspace"} ' +
-                  'select: {value: "option_value"} ' +
-                  'screenshot: {full_page: boolean} ' +
-                  'wait: {ms: milliseconds} ' +
+                  'Action-specific parameters: ' +
+                  'click: {button: "left"|"right"|"middle", click_count: 1|2} ' +
+                  'type: {text: string, clear: boolean, delay: number, press_enter: boolean} ' +
+                  'select: {value: string} or {label: string} ' +
+                  'check: {checked: boolean} ' +
+                  'clear/clear_search: {} (clears input field) ' +
+                  'append: {text: string, delay: number} ' +
+                  'set_value/set_color/set_date: {value: string} ' +
+                  'fill_form: {form_id, fields: {name: value}, submit: boolean} ' +
+                  'scroll: {direction: "up"|"down"|"left"|"right", amount: pixels} or {mode: "auto_scroll"} ' +
+                  'keyboard: {key: "Enter"|"Escape"|"Tab"|"Backspace"|"F5"|"Control+A"} ' +
+                  'screenshot: {full_page: boolean} (in-memory, see browser_screenshot for file download) ' +
+                  'media_control: {command: "play"|"pause"|"seek", time_seconds?: number, volume?: number} ' +
+                  'open_tab: {url?: string} ' +
+                  'switch_tab: {tab_id: string} ' +
+                  'close_tab: {tab_id?: string} ' +
+                  'set_viewport: {width: number, height: number} ' +
                   'upload: {file_path: string} ' +
-                  'download: {file_name: string}',
+                  'download: {file_name: string} ' +
+                  'wait/wait_for: {condition: string, timeout_ms: number} ' +
+                  'evaluate: {script: string, args?: object} ' +
+                  'go_back/go_forward: {} (no params needed) ' +
+                  'refresh: {} (no params needed)',
               },
               auto_snapshot: {
                 type: 'boolean',
@@ -519,18 +559,21 @@ class McpServer {
         // -------------------------------------------------------------------------
         // browser_run_flow - Run action chain in one round trip
         // -------------------------------------------------------------------------
-        {
+{
           name: 'browser_run_flow',
           description:
             'Run a sequence of browser actions in one MCP call. Use this to avoid repeated LLM↔browser round trips. ' +
-            'Steps support target_id or target_semantic. Returns per-step results and optional final snapshot.',
+            'TIP: Steps support ALL browser_action actions: click, type, select, check, fill_form, etc. ' +
+            'TIP: Use target_id or target_semantic for element targeting within each step. ' +
+            'TIP: Useful for multi-step workflows like login, checkout, or form submission. ' +
+            'TIP: Use stop_on_error: false to attempt all steps even if one fails.',
           inputSchema: {
             type: 'object',
             properties: {
               steps: {
                 type: 'array',
                 items: { type: 'object' },
-                description: 'Array of steps: {action, target_id?, target_semantic?, params?}.',
+                description: 'Array of steps: {action, target_id?, target_semantic?, params?}. Supports all browser_action actions.',
               },
               actions: {
                 type: 'array',
@@ -539,7 +582,7 @@ class McpServer {
               },
               stop_on_error: {
                 type: 'boolean',
-                description: 'Stop flow at first failed step (default true).',
+                description: 'Stop flow at first failed step (default true). Set false to attempt all steps.',
               },
               auto_snapshot: {
                 type: 'boolean',
@@ -565,19 +608,43 @@ class McpServer {
         // -------------------------------------------------------------------------
         // browser_evaluate - Execute JS snippet without snapshot
         // -------------------------------------------------------------------------
-        {
+{
           name: 'browser_evaluate',
           description:
             'Evaluate a JavaScript expression/snippet in the page and return the serializable result without taking a snapshot. ' +
-            'Default read_only mode blocks obvious DOM/network mutations.',
+            'TIP: Access passed args in code via args.myKey (for example with args: {myKey: "value"}). ' +
+            'TIP: Returns only serializable values (strings, numbers, arrays, objects). ' +
+            'TIP: Use read_only: false only when you intentionally need to modify the page.',
           inputSchema: {
             type: 'object',
             properties: {
-              script: { type: 'string', description: 'JavaScript expression or snippet to evaluate.' },
-              expression: { type: 'string', description: 'Alias for script.' },
-              args: { type: 'object', description: 'Optional object available to the snippet as args.' },
-              read_only: { type: 'boolean', description: 'Block mutating snippets when true (default true).' },
-              timeout_ms: { type: 'number', description: 'Max runtime in ms (default 1000).' },
+              script: {
+                type: 'string',
+                description: 'JavaScript expression or snippet to evaluate. Use return statement for multi-line.',
+              },
+              expression: {
+                type: 'string',
+                description: 'Alias for script.',
+              },
+              javascript: {
+                type: 'string',
+                description: 'Alias for script.',
+              },
+              args: {
+                type: 'object',
+                description:
+                  'Optional parameters passed to the snippet. ' +
+                  'Access in code: args.myParam (e.g. args.url, args.selector). ' +
+                  'Example: script: "document.querySelector(args.selector).textContent" with args: {selector: ".title"}',
+              },
+              read_only: {
+                type: 'boolean',
+                description: 'Block mutating snippets when true (default true). Set false to allow DOM changes.',
+              },
+              timeout_ms: {
+                type: 'number',
+                description: 'Max runtime in ms (default: 1000). Increase for complex scripts.',
+              },
             },
           },
         },
@@ -607,11 +674,90 @@ class McpServer {
           name: 'browser_list_tabs',
           description:
             'List all open browser tabs with their URLs and titles. ' +
-            'TIP: Use to find previously opened tabs or switch between pages. ' +
-            'TIP: Active tab is marked with active: true.',
+            'TIP: Use to find tab_id values for browser_switch_tab. ' +
+            'TIP: Each tab has a unique tab_id like "tab-1", "tab-2", etc. — pass this to switch_tab. ' +
+            'TIP: Active tab has active: true. Use this to confirm which tab you are in. ' +
+            'TIP: Returns array sorted by creation order; most recently active is last.',
           inputSchema: {
             type: 'object',
             properties: {},
+          },
+        },
+
+        // -------------------------------------------------------------------------
+        // browser_open_tab - Open new tab
+        // -------------------------------------------------------------------------
+        {
+          name: 'browser_open_tab',
+          description:
+            'Open a new browser tab with an optional URL. ' +
+            'TIP: The new tab automatically becomes the active tab. ' +
+            'TIP: If URL is omitted, opens a blank tab. ' +
+            'TIP: Returns the new tab info and updated list of all tabs. ' +
+            'Common use cases: Open multiple search results, navigate to additional pages without losing current context.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              url: {
+                type: 'string',
+                description:
+                  'Optional URL to open in the new tab. ' +
+                  'Must be http:// or https:// if provided. ' +
+                  'If omitted, opens a blank tab.',
+              },
+            },
+            required: [],
+          },
+        },
+
+        // -------------------------------------------------------------------------
+        // browser_switch_tab - Switch to a different tab
+        // -------------------------------------------------------------------------
+        {
+          name: 'browser_switch_tab',
+          description:
+            'Switch the browser to a different open tab. ' +
+            'TIP: Use browser_list_tabs first to find the tab_id of the target tab. ' +
+            'TIP: Returns the URL and title of the newly active tab. ' +
+            'TIP: Use after browser_open_tab or when you need to work in a different tab. ' +
+            'Common use cases: Review a previously opened tab, switch between multiple tasks.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tab_id: {
+                type: 'string',
+                description:
+                  'The ID of the tab to switch to. ' +
+                  'Obtain this from browser_list_tabs response (tab_id field).',
+              },
+            },
+            required: ['tab_id'],
+          },
+        },
+
+        // -------------------------------------------------------------------------
+        // browser_close_tab - Close a tab
+        // -------------------------------------------------------------------------
+        {
+          name: 'browser_close_tab',
+          description:
+            'Close a browser tab. ' +
+            'TIP: If tab_id is omitted, closes the currently active tab. ' +
+            'TIP: Cannot close the last remaining tab. ' +
+            'TIP: Returns which tab became active after closing. ' +
+            'TIP: Use browser_list_tabs to confirm which tabs remain. ' +
+            'Common use cases: Clean up temporary tabs, close finished tasks.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              tab_id: {
+                type: 'string',
+                description:
+                  'Optional ID of the tab to close. ' +
+                  'If omitted, closes the currently active tab.',
+              },
+            },
+            required: [],
           },
         },
 
@@ -671,13 +817,15 @@ class McpServer {
             'Find specific elements on the page by text, type, or attribute without reading full snapshot. ' +
             'TIP: Use for targeted searches when you know what you need. ' +
             'TIP: Much faster than full snapshot for simple lookups. ' +
-            'TIP: Returns element IDs that can be used in browser_action.',
+            'TIP: Returns element IDs that can be used in browser_action. ' +
+            'TIP: Searches across text, label, id, name, placeholder, and ariaLabel attributes.',
           inputSchema: {
             type: 'object',
             properties: {
               query: {
                 type: 'string',
-                description: 'Search query to match against element text, label, or id.',
+                description:
+                  'Search query to match against element text, label, id, name, placeholder, or ariaLabel.',
               },
               element_type: {
                 type: 'string',
@@ -701,21 +849,26 @@ class McpServer {
           name: 'browser_paginate',
           description:
             'Scroll through a list/pagination and collect all items. Use for infinite scroll pages. ' +
-            'TIP: Specify selector for the item container and next button. ' +
-            'TIP: Returns all collected items plus next button state. ' +
-            'TIP: Set max_pages to limit iterations. Check has_more for more content.',
+            'TIP: item_container is a CSS selector (e.g., ".product-item", "[data-product-id]"), NOT an element ID from snapshot. ' +
+            'TIP: Without next_button, fetches only the first page of items. ' +
+            'TIP: next_button: "infinite" enables automatic infinite scroll detection. ' +
+            'TIP: Returns all collected items, page count, and has_more flag. ' +
+            'TIP: Use wait_between_ms for pages that load content dynamically.',
           inputSchema: {
             type: 'object',
             properties: {
               item_container: {
                 type: 'string',
-                description: 'CSS selector for item container (e.g., ".product-item", "tr[data-id]").',
+                description:
+                  'CSS selector for item container (e.g., ".product-item", "tr[data-id]", "[class*=card]"). ' +
+                  'IMPORTANT: This is a CSS selector, not an element ID from browser_snapshot.',
               },
               next_button: {
                 type: 'string',
                 description:
                   'CSS selector for next/load-more button. ' +
-                  'Set to "infinite" for auto-detection of infinite scroll.',
+                  'Set to "infinite" for auto-detection of infinite scroll pages. ' +
+                  'Omit to collect items from current page only.',
               },
               max_pages: {
                 type: 'number',
@@ -723,7 +876,7 @@ class McpServer {
               },
               wait_between_ms: {
                 type: 'number',
-                description: 'Wait time between scrolls in ms (default: 1000).',
+                description: 'Wait time between scrolls in ms (default: 1000). Increase for slow-loading pages.',
               },
             },
             required: ['item_container'],
@@ -745,8 +898,11 @@ class McpServer {
               condition: {
                 type: 'string',
                 description:
-                  'Wait condition: element_visible, element_hidden, element_enabled, ' +
-                  'page_loaded, network_idle, text_contains, url_contains.',
+                  'Wait condition: ' +
+                  'element_visible, element_hidden, element_enabled, element_stable, ' +
+                  'page_loaded, network_idle, text_contains, url_contains. ' +
+                  'element_enabled: wait until element is not disabled. ' +
+                  'element_stable: wait until element stops animating/moving.',
               },
               target: {
                 type: 'string',
@@ -982,6 +1138,15 @@ class McpServer {
 
       case 'browser_list_tabs':
         return await this.handleListTabs();
+
+      case 'browser_open_tab':
+        return await this.handleOpenTab(args);
+
+      case 'browser_switch_tab':
+        return await this.handleSwitchTab(args);
+
+      case 'browser_close_tab':
+        return await this.handleCloseTab(args);
 
       case 'browser_screenshot':
         return await this.handleScreenshot(args);
@@ -1453,7 +1618,7 @@ class McpServer {
     };
   }
 
-  private async handleListTabs(): Promise<any> {
+private async handleListTabs(): Promise<any> {
     const sessionId = await this.ensureSession();
     const tabs = await this.browserCore.listTabs(sessionId);
 
@@ -1469,6 +1634,99 @@ class McpServer {
         },
       ],
     };
+  }
+
+  private async handleOpenTab(args: { url?: string }): Promise<any> {
+    // Validate URL if provided
+    if (args.url) {
+      this.validateUrl(args.url);
+      if (!this.checkRateLimit('browser_navigate')) {
+        throw this.createRateLimitedError('browser_open_tab');
+      }
+    }
+
+    const sessionId = await this.ensureSession();
+
+    try {
+      const newTab = await this.browserCore.openTab(sessionId, args.url);
+      const allTabs = await this.browserCore.listTabs(sessionId);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: 'tab_opened',
+              new_tab: newTab,
+              tabs: allTabs,
+              tabs_count: allTabs.length,
+            }, null, 2),
+          },
+        ],
+      };
+    } catch (error: any) {
+      throw this.enhanceError(error, 'open_tab', {
+        suggestion: 'Check if URL is valid. Ensure you haven\'t reached maximum tab limit.',
+      });
+    }
+  }
+
+  private async handleSwitchTab(args: { tab_id: string }): Promise<any> {
+    if (!args.tab_id) {
+      throw new LlmBrowserError('MISSING_PARAM', 'tab_id is required for browser_switch_tab');
+    }
+
+    const sessionId = await this.ensureSession();
+
+    try {
+      const switchedTab = await this.browserCore.switchTab(sessionId, args.tab_id);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: 'tab_switched',
+              active_tab: switchedTab,
+              url: switchedTab.url,
+              title: switchedTab.title,
+            }, null, 2),
+          },
+        ],
+      };
+    } catch (error: any) {
+      throw this.enhanceError(error, 'switch_tab', {
+        suggestion: 'Use browser_list_tabs to get valid tab IDs first.',
+      });
+    }
+  }
+
+  private async handleCloseTab(args: { tab_id?: string }): Promise<any> {
+    const sessionId = await this.ensureSession();
+
+    try {
+      const result = await this.browserCore.closeTab(sessionId, args.tab_id);
+      const allTabs = await this.browserCore.listTabs(sessionId);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              status: 'tab_closed',
+              closed_tab_id: result.closed_tab_id,
+              active_tab: result.active_tab,
+              remaining_tabs: allTabs,
+              remaining_count: allTabs.length,
+            }, null, 2),
+          },
+        ],
+      };
+    } catch (error: any) {
+      throw this.enhanceError(error, 'close_tab', {
+        suggestion: 'You cannot close the last remaining tab. Use browser_list_tabs to check your tabs.',
+      });
+    }
   }
 
   private async handleScreenshot(args: { full_page?: boolean; cache_key?: string }): Promise<any> {
@@ -2367,10 +2625,10 @@ class McpServer {
         tool,
         available_tools: [
           'browser_navigate', 'browser_snapshot', 'browser_action',
-          'browser_list_tabs', 'browser_screenshot', 'browser_diagnostics',
-          'browser_element_search', 'browser_paginate', 'browser_wait_for',
-          'browser_session_info', 'browser_metrics', 'browser_close_session',
-          'browser_restart', 'browser_ping'
+          'browser_list_tabs', 'browser_open_tab', 'browser_switch_tab', 'browser_close_tab',
+          'browser_screenshot', 'browser_diagnostics', 'browser_element_search',
+          'browser_paginate', 'browser_wait_for', 'browser_session_info', 'browser_metrics',
+          'browser_close_session', 'browser_restart', 'browser_ping'
         ],
       }
     );
