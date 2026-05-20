@@ -489,12 +489,17 @@ export class CommandRouter {
       if (typeof (this.stateManager as any).injectAllTrackers === 'function') {
         await this.stateManager.injectAllTrackers(page, command.session_id).catch(() => undefined);
       }
-      const bouncerResult = await this.traceAsync(
-        traceId,
-        'bouncer.dismiss',
-        { enabled: activeAction.params.auto_bounce !== false },
-        () => this.bouncer.dismiss(page, { enabled: activeAction.params.auto_bounce !== false })
-      ).catch(() => undefined);
+
+      // NOTE: auto_bounce for post-action snapshot is handled in getPostActionSnapshot.
+      // Only run bouncer here for explicit browser_snapshot calls (action === 'snapshot').
+      const bouncerResult = activeAction.executionAction === 'snapshot'
+        ? await this.traceAsync(
+            traceId,
+            'bouncer.dismiss',
+            { enabled: activeAction.params.auto_bounce !== false },
+            () => this.bouncer.dismiss(page, { enabled: activeAction.params.auto_bounce !== false })
+          ).catch(() => undefined)
+        : undefined;
       const active = activeTab(this.stateManager.getSessionState(command.session_id));
       let previousSnapshot = active ? this.previousSnapshots.get(snapKey(command.session_id, active.tab_id)) : undefined;
 

@@ -574,6 +574,13 @@ auto_bounce: {
                 items: { type: 'string' },
                 description: 'When auto_snapshot is true, filter post-action snapshot by affordances.',
               },
+              auto_bounce: {
+                type: 'boolean',
+                description:
+                  'When auto_snapshot is true, auto-dismiss safe popups/banners before taking the post-action snapshot (default true). ' +
+                  'Set to false when you need to read the page state after an action (e.g., flash banners, status messages, overlays). ' +
+                  'TIP: Use browser_snapshot with auto_bounce: false separately if you need to read the full page.',
+              },
             },
             required: ['action'],
           },
@@ -623,6 +630,12 @@ auto_bounce: {
               delta_only: {
                 type: 'boolean',
                 description: 'Return only final delta when possible.',
+              },
+              auto_bounce: {
+                type: 'boolean',
+                description:
+                  'When auto_snapshot is true, auto-dismiss safe popups/banners before taking the post-flow snapshot (default true). ' +
+                  'Set to false when you need to read the page state after the flow (e.g., flash messages, status banners).',
               },
             },
           },
@@ -1445,6 +1458,7 @@ auto_bounce: {
     actionable_only?: boolean;
     actionableOnly?: boolean;
     affordances?: string[];
+    auto_bounce?: boolean;
   }): Promise<any> {
     const autoSnapshot = args.auto_snapshot !== false;
 
@@ -1521,7 +1535,7 @@ auto_bounce: {
         suggestion: this.getActionSuggestion(args.action, args.target_id),
       });
 
-      throw enhancedError;
+throw enhancedError;
     }
   }
 
@@ -1534,6 +1548,7 @@ auto_bounce: {
     actionable_only?: boolean;
     actionableOnly?: boolean;
     affordances?: string[];
+    auto_bounce?: boolean;
   }): Promise<any> {
     const sessionId = await this.ensureSession();
     const steps = args.steps ?? args.actions;
