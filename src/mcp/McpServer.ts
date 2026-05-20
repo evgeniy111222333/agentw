@@ -694,6 +694,7 @@ auto_bounce: {
             'TIP: The new tab automatically becomes the active tab. ' +
             'TIP: If URL is omitted, opens a blank tab. ' +
             'TIP: Returns the new tab info and updated list of all tabs. ' +
+            'NOTE: Shares rate limit bucket with browser_navigate (navigating to a URL counts against the same limit). ' +
             'Common use cases: Open multiple search results, navigate to additional pages without losing current context.',
           inputSchema: {
             type: 'object',
@@ -1640,7 +1641,7 @@ private async handleListTabs(): Promise<any> {
     // Validate URL if provided
     if (args.url) {
       this.validateUrl(args.url);
-      if (!this.checkRateLimit('browser_navigate')) {
+      if (!this.checkRateLimit('browser_open_tab')) {
         throw this.createRateLimitedError('browser_open_tab');
       }
     }
@@ -2465,7 +2466,7 @@ private async handleListTabs(): Promise<any> {
   private getRateLimitForTool(tool: string): number {
     switch (tool) {
       case 'browser_navigate':
-      case 'navigate':
+      case 'browser_open_tab':
         return this.navigateRateLimit;
       case 'browser_snapshot':
         return this.snapshotRateLimit;
