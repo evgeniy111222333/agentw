@@ -90,6 +90,11 @@ export class OpStore<T = any> {
     return this.records.get(operationId);
   }
 
+  getForSession(operationId: string, sessionId: string): OpRecord<T> | undefined {
+    const record = this.records.get(operationId);
+    return record?.session_id === sessionId ? record : undefined;
+  }
+
   list(filter: { session_id?: string } = {}): OpRecord<T>[] {
     return [...this.records.values()].filter((record) => {
       if (filter.session_id && record.session_id !== filter.session_id) return false;
@@ -110,6 +115,27 @@ export class OpStore<T = any> {
     this.clearProgress(record);
     void Promise.resolve(record.cancel?.()).catch(() => undefined);
     return record;
+  }
+
+  cancelForSession(operationId: string, sessionId: string): OpRecord<T> | undefined {
+    const record = this.getForSession(operationId, sessionId);
+    return record ? this.cancel(operationId) : undefined;
+  }
+
+  clearSession(sessionId: string): number {
+    let removed = 0;
+    for (const [operationId, record] of [...this.records.entries()]) {
+      if (record.session_id !== sessionId) continue;
+      if (record.state === 'running') {
+        record.state = 'cancelled';
+        record.completed_at = new Date().toISOString();
+        void Promise.resolve(record.cancel?.()).catch(() => undefined);
+      }
+      this.clearProgress(record);
+      this.records.delete(operationId);
+      removed += 1;
+    }
+    return removed;
   }
 
   toStatus(record: OpRecord<T>): OpStatus<T> {

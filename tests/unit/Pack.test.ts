@@ -24,6 +24,12 @@ describe('Session Pack', () => {
         origins: [{ origin: 'https://example.test', localStorage: [{ name: 'mode', value: 'dark' }] }],
       },
       page: { url: session.current_url, title: 'App' },
+      scripts: {
+        login: {
+          params: ['email'],
+          steps: [{ action: 'type', target_id: 'email', params: { text: '{{email}}' } }],
+        },
+      },
       snapshot: {
         version: '2.3.0',
         url: session.current_url,
@@ -55,6 +61,7 @@ describe('Session Pack', () => {
     }));
     expect(importedActions(parsed, 'new-session')[0].session_id).toBe('new-session');
     expect(importedSnapshot(parsed, 'new-session')?.session.session_id).toBe('new-session');
+    expect(parsed.scripts?.login.params).toEqual(['email']);
   });
 
   it('rejects unsupported package versions', () => {

@@ -141,6 +141,28 @@ describe('Declarative action system', () => {
     await expect(page!.locator('#status').textContent()).resolves.toBe('fallback');
   });
 
+  it('isolates scripts per session and blocks recursive script calls', async () => {
+    await page!.setContent('<input id="email">');
+
+    await executor.executeAction('session-a', 'define_script', undefined, {
+      name: 'login',
+      steps: [{ action: 'type', target_id: 'email', params: { text: 'a@example.com' } }],
+    });
+
+    await expect(executor.executeAction('session-b', 'call_script', undefined, {
+      name: 'login',
+    })).rejects.toMatchObject({ code: 'SCRIPT_NOT_FOUND' });
+
+    await executor.executeAction('session-a', 'define_script', undefined, {
+      name: 'loop',
+      steps: [{ action: 'call_script', params: { name: 'loop' } }],
+    });
+
+    await expect(executor.executeAction('session-a', 'call_script', undefined, {
+      name: 'loop',
+    })).rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+  });
+
   it('evaluates custom_javascript wait conditions', async () => {
     await page!.setContent('<p id="status">idle</p>');
     await page!.evaluate(() => {
@@ -188,6 +210,9 @@ describe('Declarative action system', () => {
     expect(result.data).toEqual(expect.objectContaining({ result: '$19.99', read_only: true }));
     await expect(executor.executeAction('session', 'evaluate', undefined, {
       script: "document.querySelector('.price').textContent = '$0'",
+    })).rejects.toMatchObject({ code: 'SECURITY_VIOLATION' });
+    await expect(executor.executeAction('session', 'evaluate', undefined, {
+      script: "window['fet' + 'ch']('/leak')",
     })).rejects.toMatchObject({ code: 'SECURITY_VIOLATION' });
   });
 

@@ -18,7 +18,7 @@ import { Probe } from '../health/Probe';
 import { importedActions, importedSession, importedSnapshot, makePack, readPack } from '../session/Pack';
 import { globalTraceStore } from '../trace/Trace';
 import { globalSemCache } from '../cache/Sem';
-import { activeTab, deleteSessionSnaps, snapKey } from '../session/Tabs';
+import { activeTab, snapKey } from '../session/Tabs';
 
 export class ApiServer {
   private app = express();
@@ -42,6 +42,10 @@ export class ApiServer {
 
   constructor() {
     this.app.use(express.json({ limit: '8mb' }));
+    this.stateManager.setCheckpointExtrasProvider((sessionId) => ({
+      scripts: this.actionExecutor.exportScripts(sessionId),
+    }));
+    this.restoreScriptsFromCheckpoints();
     this.setupRoutes();
   }
 
@@ -93,11 +97,18 @@ export class ApiServer {
 
     this.app.get('/api/v2/ops', (req, res) => {
       const session_id = stringQuery(req.query.session_id);
+      if (!session_id) {
+        return this.sendRestError(res, new LlmBrowserError('MISSING_PARAM', 'session_id is required for operation listing'));
+      }
       res.json(paginate(this.commandRouter.listOps(session_id), req.query, '/api/v2/ops'));
     });
 
     this.app.get('/api/v2/ops/:operationId', (req, res) => {
-      const status = this.commandRouter.getOp(req.params.operationId);
+      const sessionId = stringQuery(req.query.session_id);
+      if (!sessionId) {
+        return this.sendRestError(res, new LlmBrowserError('MISSING_PARAM', 'session_id is required for operation lookup'));
+      }
+      const status = this.commandRouter.getOp(req.params.operationId, sessionId);
       if (!status) {
         return this.sendRestError(res, new LlmBrowserError('ELEMENT_NOT_FOUND', 'Operation not found'));
       }
@@ -105,7 +116,11 @@ export class ApiServer {
     });
 
     this.app.post('/api/v2/ops/:operationId/cancel', (req, res) => {
-      const status = this.commandRouter.cancelOp(req.params.operationId);
+      const sessionId = stringQuery(req.query.session_id) ?? stringQuery(req.body?.session_id);
+      if (!sessionId) {
+        return this.sendRestError(res, new LlmBrowserError('MISSING_PARAM', 'session_id is required for operation cancellation'));
+      }
+      const status = this.commandRouter.cancelOp(req.params.operationId, sessionId);
       if (!status) {
         return this.sendRestError(res, new LlmBrowserError('ELEMENT_NOT_FOUND', 'Operation not found'));
       }
@@ -118,9 +133,10 @@ export class ApiServer {
     });
 
     this.app.post('/api/v2/sessions', async (req, res) => {
+      let sessionId: string | undefined;
       try {
         await this.pruneExpiredSessions();
-        const sessionId = randomUUID();
+        sessionId = randomUUID();
         const viewport = viewportBody(req.body);
         await this.browserCore.createSession(sessionId, { viewport });
         this.stateManager.registerSession(sessionId, { viewport: this.browserCore.getViewport(sessionId) });
@@ -129,8 +145,12 @@ export class ApiServer {
         await this.stateManager.injectAllTrackers(page, sessionId);
         globalMetrics.increment('llm_browser_sessions_created_total');
 
-        res.status(201).json({ session_id: sessionId });
+        res.status(201).json({
+          session_id: sessionId,
+          ws_token: this.commandRouter.issueWebSocketToken(sessionId),
+        });
       } catch (error: any) {
+        if (sessionId) await this.cleanupSession(sessionId);
         this.sendRestError(res, normalizeError(error, { operation: 'create_session' }));
       }
     });
@@ -153,6 +173,7 @@ export class ApiServer {
           viewport: this.browserCore.getViewport(sessionId),
         });
         if (pack.form_states) this.stateManager.setFormStates(sessionId, pack.form_states);
+        this.actionExecutor.importScripts(sessionId, pack.scripts);
         this.stateManager.setActionHistory(sessionId, importedActions(pack, sessionId));
         const snapshot = importedSnapshot(pack, sessionId);
         if (snapshot) this.previousSnapshots.set(snapKey(sessionId, snapshot.session.tab_id), snapshot);
@@ -173,6 +194,7 @@ export class ApiServer {
         globalMetrics.increment('llm_browser_sessions_imported_total');
         res.status(201).json({
           session_id: sessionId,
+          ws_token: this.commandRouter.issueWebSocketToken(sessionId),
           imported_from_session_id: pack.session.session_id,
           current_url: this.stateManager.getSessionState(sessionId)?.current_url,
           actions_imported: pack.actions.length,
@@ -180,9 +202,7 @@ export class ApiServer {
         });
       } catch (error: any) {
         if (sessionId) {
-          await this.browserCore.closeSession(sessionId).catch(() => undefined);
-          this.stateManager.closeSession(sessionId);
-          deleteSessionSnaps(this.previousSnapshots, sessionId);
+          await this.cleanupSession(sessionId);
         }
         this.sendRestError(res, normalizeError(error, { operation: 'import_session' }));
       }
@@ -208,6 +228,7 @@ export class ApiServer {
           snapshot: this.activeSnapshot(req.params.id),
           formStates: this.stateManager.getFormStates(req.params.id),
           eventBus: globalEventBus.snapshot({ session_id: req.params.id, limit: 500 }),
+          scripts: this.actionExecutor.exportScripts(req.params.id),
         });
         globalMetrics.increment('llm_browser_sessions_exported_total');
         res.json(pack);
@@ -419,9 +440,7 @@ export class ApiServer {
 
     this.app.delete('/api/v2/sessions/:id', async (req, res) => {
       try {
-        await this.browserCore.closeSession(req.params.id);
-        this.stateManager.closeSession(req.params.id);
-        deleteSessionSnaps(this.previousSnapshots, req.params.id);
+        await this.cleanupSession(req.params.id);
         globalMetrics.increment('llm_browser_sessions_closed_total');
         res.status(204).send();
       } catch (error: any) {
@@ -447,8 +466,12 @@ export class ApiServer {
     const port = ConfigurationManager.getInstance().getConfig().server.port;
     await new Promise<void>((resolve) => {
       this.httpServer = this.app.listen(port, () => {
+        const timeoutMs = ConfigurationManager.getInstance().getConfig().server.timeout_ms;
+        this.httpServer!.requestTimeout = timeoutMs;
+        this.httpServer!.headersTimeout = timeoutMs + 5000;
+        this.httpServer!.timeout = timeoutMs;
         this.wsGateway = new WebSocketGateway(this.httpServer!, this.commandRouter);
-        console.log(`LLM-Browser API Server running on port ${port}`);
+        console.log(`Prism API Server running on port ${port}`);
         resolve();
       });
     });
@@ -539,10 +562,25 @@ export class ApiServer {
       .filter((session) => session.status === 'active' && Date.parse(session.updated_at) < cutoff);
 
     for (const session of expired) {
-      await this.browserCore.closeSession(session.session_id).catch(() => undefined);
-      this.stateManager.updateSession(session.session_id, { status: 'expired' });
-      deleteSessionSnaps(this.previousSnapshots, session.session_id);
+      await this.cleanupSession(session.session_id);
       globalMetrics.increment('llm_browser_sessions_expired_total');
+    }
+  }
+
+  private async cleanupSession(sessionId: string): Promise<void> {
+    await this.browserCore.closeSession(sessionId).catch(() => undefined);
+    this.commandRouter.cleanupSession(sessionId);
+    this.stateManager.purgeSession(sessionId);
+    void globalEventBus.publish('session_closed', {
+      session_id: sessionId,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  private restoreScriptsFromCheckpoints(): void {
+    for (const session of this.stateManager.listSessions()) {
+      const extras = this.stateManager.getCheckpointExtras(session.session_id);
+      this.actionExecutor.importScripts(session.session_id, extras.scripts);
     }
   }
 }

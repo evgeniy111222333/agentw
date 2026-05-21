@@ -197,7 +197,7 @@ function benchmarkHtml(): string {
   return `<!doctype html>
 <html>
   <head>
-    <title>LLM Browser Measurement</title>
+    <title>Prism Measurement</title>
     <style>
       body { font-family: sans-serif; }
       .muted { color: #666; }

@@ -2,6 +2,7 @@ node_modules/
 dist/
 coverage/
 .llm-browser/
+.prism/
 
 *.log
 npm-debug.log*

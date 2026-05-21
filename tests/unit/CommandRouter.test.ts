@@ -106,7 +106,10 @@ describe('CommandRouter', () => {
     const asyncRouter = new CommandRouter(
       {
         listTabs: jest.fn(async () => state.tabs),
-        getPage: jest.fn(() => ({})),
+        getPage: jest.fn(() => ({
+          url: () => 'https://example.com/start',
+          evaluate: jest.fn(async () => []),
+        })),
         getViewport: jest.fn(() => ({ width: 1280, height: 720 })),
       } as any,
       {
@@ -153,6 +156,82 @@ describe('CommandRouter', () => {
     }));
 
     await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(asyncRouter.getOp((result as any).operation_id)?.state).toBe('done');
+    expect(asyncRouter.getOp((result as any).operation_id, 'session')?.state).toBe('done');
+    expect(asyncRouter.getOp((result as any).operation_id, 'other-session')).toBeUndefined();
+  });
+
+  it('serializes actions per session and redacts credentials from action history', async () => {
+    const state = {
+      session_id: 'session',
+      status: 'active',
+      updated_at: new Date().toISOString(),
+      current_url: 'https://example.com/start',
+      tabs: [{ tab_id: 'tab-1', url: 'https://example.com/start', title: 'Start', active: true }],
+      history: [],
+      cookies: [],
+      configuration: {},
+    };
+    const records: any[] = [];
+    const events: string[] = [];
+    const queuedRouter = new CommandRouter(
+      {
+        listTabs: jest.fn(async () => state.tabs),
+        getPage: jest.fn(() => ({
+          url: () => 'https://example.com/start',
+          evaluate: jest.fn(async () => []),
+        })),
+        getViewport: jest.fn(() => ({ width: 1280, height: 720 })),
+      } as any,
+      {
+        getActionHistory: () => records,
+        getSessionState: () => state,
+        recordAction: jest.fn((record) => records.push(record)),
+        syncTabs: jest.fn(),
+        recordPageState: jest.fn(),
+        updateSession: jest.fn(),
+      } as any,
+      {
+        executeAction: jest.fn(async (_sessionId, action) => {
+          events.push(`start:${action}`);
+          await new Promise((resolve) => setTimeout(resolve, action === 'login_flow' ? 20 : 0));
+          events.push(`end:${action}`);
+          return { action, duration_ms: 1, data: { ok: true } };
+        }),
+      } as any,
+      {
+        createSnapshot: jest.fn(async () => ({
+          snapshot_id: `snap-${records.length}`,
+          version: '2.2.0',
+          url: 'https://example.com/start',
+          title: 'Start',
+          timestamp: new Date().toISOString(),
+          elements: [],
+          available_actions: [],
+          session: { session_id: 'session', tab_id: 'tab-1', tabs_count: 1, history_length: 0, cookies_count: 0 },
+          meta: { extraction_time: 1 },
+        })),
+      } as any,
+      new Map()
+    );
+
+    await Promise.all([
+      queuedRouter.execute({
+        action: 'login_flow',
+        session_id: 'session',
+        action_params: {
+          url: 'https://example.com/login',
+          credentials: { username: 'u', password: 'secret' },
+        },
+      }),
+      queuedRouter.execute({
+        action: 'wait',
+        session_id: 'session',
+        action_params: { ms: 1 },
+      }),
+    ]);
+
+    expect(events).toEqual(['start:login_flow', 'end:login_flow', 'start:wait', 'end:wait']);
+    expect(JSON.stringify(records)).not.toContain('secret');
+    expect(JSON.stringify(records)).toContain('[redacted]');
   });
 });

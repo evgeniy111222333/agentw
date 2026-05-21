@@ -254,6 +254,7 @@ export interface ImportSessionOptions {
 
 export interface ImportSessionResponse {
   session_id: string;
+  ws_token?: string;
   imported_from_session_id: string;
   current_url?: string;
   actions_imported: number;
@@ -281,6 +282,7 @@ export interface BrowserClientOptions {
 
 export interface CreateSessionResponse {
   session_id: string;
+  ws_token?: string;
 }
 
 export interface BrowserClientContract {

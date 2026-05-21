@@ -1,4 +1,4 @@
-import { Locator, Page } from 'playwright';
+import { Frame, Locator, Page } from 'playwright';
 import { BrowserCore } from '../layer1_browser_core/BrowserCore';
 import { SemanticElement } from '../common/types';
 import { globalEventBus } from '../common/EventBus';
@@ -34,24 +34,58 @@ const ACTION_RISK_SCORE: Record<string, number> = {
  * Concept §5.8: ScriptRegistry — stores named, parameterized action sequences.
  */
 class ScriptRegistry {
-  private scripts = new Map<string, { steps: FlowStep[]; params: string[] }>();
+  private scripts = new Map<string, Map<string, { steps: FlowStep[]; params: string[] }>>();
+  private readonly maxPerSession = Math.max(1, Number(process.env.PRISM_SCRIPT_LIMIT_PER_SESSION ?? process.env.LLM_BROWSER_SCRIPT_LIMIT_PER_SESSION ?? 100));
 
-  define(name: string, steps: FlowStep[], params: string[] = []): void {
-    if (this.scripts.size >= 100) throw new Error('Script registry full (max 100)');
-    this.scripts.set(name, { steps, params });
+  define(sessionId: string, name: string, steps: FlowStep[], params: string[] = []): void {
+    const bucket = this.bucket(sessionId);
+    if (!bucket.has(name) && bucket.size >= this.maxPerSession) {
+      throw new Error(`Script registry full for session ${sessionId} (max ${this.maxPerSession})`);
+    }
+    bucket.set(name, cloneScript({ steps, params }));
   }
 
-  get(name: string): { steps: FlowStep[]; params: string[] } | undefined {
-    return this.scripts.get(name);
+  get(sessionId: string, name: string): { steps: FlowStep[]; params: string[] } | undefined {
+    const script = this.scripts.get(sessionId)?.get(name);
+    return script ? cloneScript(script) : undefined;
   }
 
-  list(): string[] {
-    return [...this.scripts.keys()];
+  list(sessionId: string): string[] {
+    return [...(this.scripts.get(sessionId)?.keys() ?? [])];
+  }
+
+  clearSession(sessionId: string): void {
+    this.scripts.delete(sessionId);
+  }
+
+  exportSession(sessionId: string): Record<string, { steps: FlowStep[]; params: string[] }> {
+    return Object.fromEntries(
+      [...(this.scripts.get(sessionId)?.entries() ?? [])].map(([name, script]) => [name, cloneScript(script)])
+    );
+  }
+
+  importSession(sessionId: string, scripts: Record<string, { steps: FlowStep[]; params?: string[] }> | undefined): void {
+    if (!scripts || typeof scripts !== 'object') return;
+    const bucket = new Map<string, { steps: FlowStep[]; params: string[] }>();
+    for (const [name, script] of Object.entries(scripts).slice(0, this.maxPerSession)) {
+      if (!Array.isArray(script?.steps)) continue;
+      bucket.set(name, cloneScript({ steps: script.steps, params: script.params ?? [] }));
+    }
+    this.scripts.set(sessionId, bucket);
   }
 
   /** Replace {{param}} placeholders in step params */
   instantiate(steps: FlowStep[], args: Record<string, any>): FlowStep[] {
     return substituteTemplate(steps, args) as FlowStep[];
+  }
+
+  private bucket(sessionId: string): Map<string, { steps: FlowStep[]; params: string[] }> {
+    let bucket = this.scripts.get(sessionId);
+    if (!bucket) {
+      bucket = new Map();
+      this.scripts.set(sessionId, bucket);
+    }
+    return bucket;
   }
 }
 
@@ -68,6 +102,8 @@ export class ActionExecutor {
   private scripts = new ScriptRegistry();
   private opStore = new OpStore();
   private visualStates = new Map<string, VisualState>();
+  private scriptStacks = new Map<string, string[]>();
+  private locatorHints = new Map<string, { frameUrl: string; at: number }>();
 
   constructor(
     private browserCore: BrowserCore,
@@ -77,6 +113,22 @@ export class ActionExecutor {
   /** Get risk score for an action (0-100). Concept §5.2.2 / §8.4. */
   static riskScore(action: string): number {
     return ACTION_RISK_SCORE[action] ?? 50;
+  }
+
+  clearSession(sessionId: string): void {
+    this.scripts.clearSession(sessionId);
+    this.opStore.clearSession(sessionId);
+    this.visualStates.delete(sessionId);
+    this.scriptStacks.delete(sessionId);
+    this.locatorHints.clear();
+  }
+
+  exportScripts(sessionId: string): Record<string, { steps: FlowStep[]; params: string[] }> {
+    return this.scripts.exportSession(sessionId);
+  }
+
+  importScripts(sessionId: string, scripts: Record<string, { steps: FlowStep[]; params?: string[] }> | undefined): void {
+    this.scripts.importSession(sessionId, scripts);
   }
 
   /** Concept §5.5: Execute with automatic retry based on error classification. */
@@ -183,12 +235,17 @@ export class ActionExecutor {
     switch (action) {
       case 'navigate':
         if (!params.url) throw new Error('URL is required for navigate action');
-        await page.goto(resolvePageUrl(page, String(params.url)), {
+        const response = await page.goto(resolvePageUrl(page, String(params.url)), {
           waitUntil: params.wait_until ?? params.waitUntil ?? 'load',
           timeout: params.timeout_ms ?? params.timeout ?? 30000,
         });
         await page.waitForLoadState('networkidle', { timeout: params.timeout_ms ?? 5000 }).catch(() => undefined);
-        return { url: page.url() };
+        return {
+          url: page.url(),
+          http_status: response?.status(),
+          http_ok: response?.ok(),
+          status_text: response?.statusText(),
+        };
 
       case 'open_tab':
       case 'new_tab': {
@@ -427,17 +484,17 @@ export class ActionExecutor {
         return this.asyncNavigate(sessionId, params);
 
       case 'poll':
-        return this.pollOp(params);
+        return this.pollOp(sessionId, params);
 
       case 'cancel':
-        return this.cancelOp(params);
+        return this.cancelOp(sessionId, params);
 
       // Concept §5.8: Script system
       case 'try':
         return this.tryCatch(sessionId, page, params, depth);
 
       case 'define_script':
-        return this.defineScript(params);
+        return this.defineScript(sessionId, params);
 
       case 'call_script':
         return this.callScript(sessionId, page, params, depth);
@@ -781,6 +838,9 @@ export class ActionExecutor {
       const result = await this.runStep(sessionId, page, step, results.length, depth + 1);
       results.push(result);
       if (result.status === 'error' && params.stop_on_error !== false) {
+        if (result.error_code) {
+          throw new LlmBrowserError(result.error_code as any, `sequence failed at step ${result.index}: ${result.error}`);
+        }
         throw new Error(`sequence failed at step ${result.index}: ${result.error}`);
       }
     }
@@ -792,7 +852,7 @@ export class ActionExecutor {
     const steps = assertSteps(params.steps ?? params.actions, 'steps', 20);
     if (steps.some((step) => step.action === 'parallel')) throw new Error('parallel nesting limit exceeded');
     for (const step of steps) {
-      if (!PAR_ACTIONS.has(step.action)) {
+      if (!isSafeParallelStep(step)) {
         throw new Error(`parallel does not allow ${step.action}`);
       }
     }
@@ -1184,10 +1244,10 @@ export class ActionExecutor {
   /**
    * Concept §5.7: poll — check async operation status.
    */
-  private async pollOp(params: any): Promise<Record<string, any>> {
+  private async pollOp(sessionId: string, params: any): Promise<Record<string, any>> {
     if (!params.operation_id) throw new Error('operation_id is required for poll');
 
-    const record = this.opStore.get(String(params.operation_id));
+    const record = this.opStore.getForSession(String(params.operation_id), sessionId);
     if (!record) throw new Error(`Operation not found: ${params.operation_id}`);
 
     return this.opStore.toStatus(record);
@@ -1196,10 +1256,10 @@ export class ActionExecutor {
   /**
    * Concept §5.7: cancel — cancel async operation with partial result.
    */
-  private async cancelOp(params: any): Promise<Record<string, any>> {
+  private async cancelOp(sessionId: string, params: any): Promise<Record<string, any>> {
     if (!params.operation_id) throw new Error('operation_id is required for cancel');
 
-    const record = this.opStore.cancel(String(params.operation_id));
+    const record = this.opStore.cancelForSession(String(params.operation_id), sessionId);
     if (!record) throw new Error(`Operation not found: ${params.operation_id}`);
 
     return {
@@ -1264,13 +1324,13 @@ export class ActionExecutor {
   /**
    * Concept §5.8: define_script — register named parameterized sequence.
    */
-  private async defineScript(params: any): Promise<Record<string, any>> {
+  private async defineScript(sessionId: string, params: any): Promise<Record<string, any>> {
     if (!params.name) throw new Error('name is required for define_script');
     if (!Array.isArray(params.steps)) throw new Error('steps array is required for define_script');
 
     const name = String(params.name);
     const declaredParams: string[] = params.params ?? params.parameters ?? [];
-    this.scripts.define(name, params.steps, declaredParams);
+    this.scripts.define(sessionId, name, params.steps, declaredParams);
 
     return {
       mode: 'define_script',
@@ -1278,6 +1338,7 @@ export class ActionExecutor {
       steps_count: params.steps.length,
       params: declaredParams,
       registered: true,
+      session_id: sessionId,
     };
   }
 
@@ -1292,17 +1353,31 @@ export class ActionExecutor {
   ): Promise<Record<string, any>> {
     if (!params.name) throw new Error('name is required for call_script');
 
-    const script = this.scripts.get(String(params.name));
-    if (!script) throw new LlmBrowserError('SCRIPT_NOT_FOUND', `Script not found: ${params.name}`);
+    const name = String(params.name);
+    const script = this.scripts.get(sessionId, name);
+    if (!script) throw new LlmBrowserError('SCRIPT_NOT_FOUND', `Script not found in this session: ${params.name}`);
+
+    const stack = this.scriptStacks.get(sessionId) ?? [];
+    if (stack.includes(name)) {
+      throw new LlmBrowserError('VALIDATION_ERROR', `Recursive script call detected: ${[...stack, name].join(' -> ')}`);
+    }
+    if (stack.length >= 10) {
+      throw new LlmBrowserError('VALIDATION_ERROR', 'Script call depth exceeded');
+    }
 
     const args = params.args ?? params.arguments ?? {};
     const instantiated = this.scripts.instantiate(script.steps, args);
 
-    // Execute as sequence
-    return this.sequence(sessionId, page, {
-      steps: instantiated,
-      stop_on_error: params.stop_on_error ?? true,
-    }, depth);
+    this.scriptStacks.set(sessionId, [...stack, name]);
+    try {
+      return await this.sequence(sessionId, page, {
+        steps: instantiated,
+        stop_on_error: params.stop_on_error ?? true,
+      }, depth);
+    } finally {
+      if (stack.length > 0) this.scriptStacks.set(sessionId, stack);
+      else this.scriptStacks.delete(sessionId);
+    }
   }
 
   private async upload(sessionId: string, page: Page, targetId: string | undefined, params: any): Promise<Record<string, any>> {
@@ -1352,7 +1427,7 @@ export class ActionExecutor {
     );
     await download.saveAs(target.absolutePath);
     return {
-      file: await this.box.info(sessionId, target.absolutePath),
+      file: await this.box.adoptReservedFile(sessionId, target.absolutePath),
       suggested_filename: download.suggestedFilename(),
       url: download.url(),
     };
@@ -1397,7 +1472,7 @@ export class ActionExecutor {
     if (params.margin && typeof params.margin === 'object') options.margin = params.margin;
     await page.pdf(options);
     return {
-      file: await this.box.info(sessionId, target.absolutePath),
+      file: await this.box.adoptReservedFile(sessionId, target.absolutePath),
       format: options.format,
       print_background: options.printBackground,
       landscape: options.landscape,
@@ -1506,6 +1581,7 @@ export class ActionExecutor {
         status: 'error',
         duration_ms: Math.round(performance.now() - started),
         error: error.message,
+        error_code: error?.code,
       };
     }
   }
@@ -1539,11 +1615,13 @@ export class ActionExecutor {
         if (typeof expression !== 'string' || expression.trim() === '') {
           throw new Error('custom_javascript condition requires expression');
         }
+        if (!isSafeReadOnlyExpression(expression)) {
+          throw new LlmBrowserError('SECURITY_VIOLATION', 'custom_javascript conditions accept only side-effect-free DOM read expressions');
+        }
         const timeoutMs = Math.min(Math.max(Number(condition.timeout_ms ?? 1000), 50), 5000);
         return Promise.race([
           page.evaluate((source) => {
-            const fn = new Function(`return Boolean(${source});`);
-            return Boolean(fn());
+            return Boolean(Function(`"use strict"; return (${source});`)());
           }, expression),
           new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
         ]).catch(() => false);
@@ -1557,7 +1635,7 @@ export class ActionExecutor {
     const formLocator = await this.locatorForAny(page, formId);
     const prefix = formId.includes(':') ? `${formId.slice(0, formId.lastIndexOf(':'))}:` : '';
     const field = await formLocator.evaluate((formElement, { formId, key, prefix }) => {
-      const semanticIdAttr = 'data-llm-browser-id';
+      const semanticIdAttr = 'data-prism-id';
       const state = window as unknown as { __llmBrowserNextId?: number };
       state.__llmBrowserNextId ??= 1;
       const escapeAttribute = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -1614,7 +1692,7 @@ export class ActionExecutor {
 
   private async detectFormContainer(page: Page): Promise<string> {
     return page.evaluate(() => {
-      const semanticIdAttr = 'data-llm-browser-id';
+      const semanticIdAttr = 'data-prism-id';
       const state = window as unknown as { __llmBrowserNextId?: number };
       state.__llmBrowserNextId ??= 1;
       const ensureId = (el: HTMLElement): string => {
@@ -1706,7 +1784,7 @@ export class ActionExecutor {
       const errors = controls
         .filter((field) => !field.validity.valid)
         .map((field) => ({
-          id: field.id || field.getAttribute('data-llm-browser-id') || field.name,
+          id: field.id || field.getAttribute('data-prism-id') || field.getAttribute('data-llm-browser-id') || field.name,
           name: field.name || undefined,
           message: field.validationMessage,
         }));
@@ -1789,10 +1867,16 @@ export class ActionExecutor {
       throw new Error('evaluate requires script or expression');
     }
     const readOnly = params.read_only !== false;
-    if (readOnly && looksMutating(source)) {
-      throw new LlmBrowserError('SECURITY_VIOLATION', 'Read-only evaluate blocked a mutating script', {
+    if (readOnly && !isSafeReadOnlyExpression(source)) {
+      throw new LlmBrowserError('SECURITY_VIOLATION', 'Read-only evaluate accepts only side-effect-free DOM read expressions', {
         action: 'evaluate',
         read_only: true,
+      });
+    }
+    if (!readOnly && params.allow_unsafe !== true) {
+      throw new LlmBrowserError('SECURITY_VIOLATION', 'Mutating evaluate requires allow_unsafe=true', {
+        action: 'evaluate',
+        read_only: false,
       });
     }
     const timeoutMs = Math.min(Math.max(Number(params.timeout_ms ?? 1000), 50), 10000);
@@ -2009,7 +2093,7 @@ export class ActionExecutor {
 
   private async injectVisualCursor(page: Page, state: VisualState): Promise<void> {
     await page.evaluate((cursor) => {
-      const id = 'llm-browser-visual-cursor';
+      const id = 'prism-visual-cursor';
       let el = document.getElementById(id);
       if (!el) {
         el = document.createElement('div');
@@ -2038,17 +2122,52 @@ export class ActionExecutor {
 
   private async locatorForAny(page: Page, targetId: string): Promise<Locator> {
     const escaped = targetId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const selector = `[data-llm-browser-id="${escaped}"], [id="${escaped}"]`;
-    const main = page.locator(selector).first();
-    if ((await main.count().catch(() => 0)) > 0) return main;
+    const selector = `[data-prism-id="${escaped}"], [data-llm-browser-id="${escaped}"], [id="${escaped}"]`;
+    const cacheKey = `${page.url()}::${targetId}`;
+    const hinted = this.locatorHints.get(cacheKey);
+    if (hinted && Date.now() - hinted.at < 30_000) {
+      const hintedFrame = hinted.frameUrl === 'main'
+        ? page.mainFrame()
+        : page.frames().find((frame) => frame.url() === hinted.frameUrl);
+      if (hintedFrame) {
+        const locator = (hintedFrame === page.mainFrame() ? page.locator(selector) : hintedFrame.locator(selector)).first();
+        if ((await locator.count().catch(() => 0)) > 0) return locator;
+      }
+      this.locatorHints.delete(cacheKey);
+    }
 
-    for (const frame of page.frames()) {
-      if (frame === page.mainFrame()) continue;
-      const locator = frame.locator(selector).first();
-      if ((await locator.count().catch(() => 0)) > 0) return locator;
+    const main = page.locator(selector).first();
+    if ((await main.count().catch(() => 0)) > 0) {
+      this.rememberLocatorHint(cacheKey, 'main');
+      return main;
+    }
+
+    const matches = await Promise.all(
+      page.frames()
+        .filter((frame) => frame !== page.mainFrame())
+        .map(async (frame) => {
+          const locator = frame.locator(selector).first();
+          const count = await locator.count().catch(() => 0);
+          return count > 0 ? { frame, locator } : undefined;
+        })
+    );
+    const match = matches.find((entry): entry is { frame: Frame; locator: Locator } => Boolean(entry));
+    if (match) {
+      this.rememberLocatorHint(cacheKey, match.frame.url());
+      return match.locator;
     }
 
     return main;
+  }
+
+  private rememberLocatorHint(cacheKey: string, frameUrl: string): void {
+    this.locatorHints.set(cacheKey, { frameUrl, at: Date.now() });
+    if (this.locatorHints.size > 250) {
+      const oldest = [...this.locatorHints.entries()]
+        .sort((a, b) => a[1].at - b[1].at)
+        .slice(0, this.locatorHints.size - 250);
+      for (const [key] of oldest) this.locatorHints.delete(key);
+    }
   }
 
   private async submitLocator(page: Page, locator: Locator, timeoutMs: number): Promise<void> {
@@ -2078,9 +2197,11 @@ export class ActionExecutor {
   }
 
   private async shortStabilization(page: Page, timeoutMs = 1000): Promise<void> {
-    await page.waitForLoadState('domcontentloaded', { timeout: Math.min(timeoutMs, 2000) }).catch(() => undefined);
-    await page.waitForLoadState('networkidle', { timeout: timeoutMs }).catch(() => undefined);
-    await page.waitForTimeout(100);
+    const domTimeout = Math.min(timeoutMs, 1000);
+    const networkTimeout = Math.min(timeoutMs, Number(process.env.PRISM_ACTION_NETWORK_IDLE_MS ?? process.env.LLM_BROWSER_ACTION_NETWORK_IDLE_MS ?? 750));
+    await page.waitForLoadState('domcontentloaded', { timeout: domTimeout }).catch(() => undefined);
+    if (networkTimeout > 0) await page.waitForLoadState('networkidle', { timeout: networkTimeout }).catch(() => undefined);
+    await page.waitForTimeout(Math.min(100, Number(process.env.PRISM_ACTION_SETTLE_MS ?? process.env.LLM_BROWSER_ACTION_SETTLE_MS ?? 100)));
   }
 
   private async scrollState(page: Page): Promise<Record<string, any>> {
@@ -2110,6 +2231,7 @@ export class ActionExecutor {
   private async autoScroll(page: Page, params: any): Promise<Record<string, any>> {
     const maxItems = Math.max(1, Number(params.max_items ?? 100));
     const stallTimeoutMs = Math.max(500, Number(params.stall_timeout_ms ?? 5000));
+    const maxDurationMs = Math.min(Math.max(Number(params.max_duration_ms ?? Math.max(stallTimeoutMs * 4, 10000)), 1000), 60000);
     const step = Number(params.amount ?? 900);
     const started = Date.now();
     let iterations = 0;
@@ -2117,10 +2239,10 @@ export class ActionExecutor {
     let lastCount = 0;
     let stableSince = Date.now();
 
-    while (iterations < maxItems && Date.now() - started < Math.max(stallTimeoutMs * 4, 10000)) {
+    while (iterations < maxItems && Date.now() - started < maxDurationMs) {
       const state = await page.evaluate(() => ({
         height: document.documentElement.scrollHeight,
-        count: document.querySelectorAll('a, button, input, select, textarea, article, li, [data-llm-browser-id]').length,
+        count: document.querySelectorAll('a, button, input, select, textarea, article, li, [data-prism-id], [data-llm-browser-id]').length,
         bottom: window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4,
       }));
       if (state.height !== lastHeight || state.count !== lastCount) {
@@ -2143,6 +2265,8 @@ export class ActionExecutor {
         observed_items: lastCount,
         stall_timeout_ms: stallTimeoutMs,
         duration_ms: Date.now() - started,
+        max_duration_ms: maxDurationMs,
+        stopped_by: iterations >= maxItems ? 'max_items' : Date.now() - started >= maxDurationMs ? 'max_duration' : 'stable_bottom',
       },
     };
   }
@@ -2263,7 +2387,7 @@ function semanticRoleCandidates(spec: SemanticTargetSpec): Array<{ score: number
 }
 
 function findSemanticTarget(spec: SemanticTargetSpec): { id: string; score: number; reason: string } | undefined {
-  const semanticIdAttr = 'data-llm-browser-id';
+  const semanticIdAttr = 'data-prism-id';
   const state = window as unknown as { __llmBrowserNextId?: number };
   state.__llmBrowserNextId ??= 1;
   const localNormalizeType = (value: unknown): string | undefined =>
@@ -2429,6 +2553,38 @@ function stringOrUndefined(value: unknown): string | undefined {
 function looksMutating(source: string): boolean {
   return /\b(click|submit|remove|append|prepend|replaceChildren|insertAdjacent|setAttribute|removeAttribute|write|open|fetch|XMLHttpRequest|sendBeacon|localStorage\.setItem|sessionStorage\.setItem)\b/i.test(source)
     || /(?:^|[^=!<>])=(?!=|>)/.test(source);
+}
+
+function isSafeReadOnlyExpression(source: string): boolean {
+  const trimmed = source.trim();
+  if (!trimmed || trimmed.length > 2000) return false;
+  if (looksMutating(trimmed)) return false;
+  if (/[{};]/.test(trimmed)) return false;
+  if (/\b(eval|Function|AsyncFunction|constructor|import|require|setTimeout|setInterval|requestAnimationFrame|fetch|XMLHttpRequest|WebSocket|Worker|postMessage|sendBeacon)\b/i.test(trimmed)) {
+    return false;
+  }
+  if (/\b(localStorage|sessionStorage|indexedDB|caches|cookie|navigator\.sendBeacon)\b/i.test(trimmed)) return false;
+  if (/\[[^\]]*['"`][^\]]*['"`][^\]]*\]/.test(trimmed)) return false;
+  if (!/^(?:Boolean|Number|String|Array\.from|document|window|location|Math|JSON|args|\(|!|-|\+|typeof|null|undefined|true|false|\d|["'`])/.test(trimmed)) return false;
+  return true;
+}
+
+function isSafeParallelStep(step: FlowStep): boolean {
+  if (!PAR_ACTIONS.has(step.action)) return false;
+  const params = stepParams(step);
+  for (const value of Object.values(params)) {
+    if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as any).action === 'string') {
+      return false;
+    }
+    if (Array.isArray(value) && value.some((entry) => entry && typeof entry === 'object' && typeof entry.action === 'string')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function cloneScript(script: { steps: FlowStep[]; params: string[] }): { steps: FlowStep[]; params: string[] } {
+  return JSON.parse(JSON.stringify(script));
 }
 
 function serializeEvaluationResult(value: unknown): unknown {

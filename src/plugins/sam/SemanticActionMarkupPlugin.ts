@@ -27,7 +27,7 @@ export class SemanticActionMarkupPlugin implements SemanticPlugin {
       type ExtractedAction = AvailableAction & { target?: string };
       type ExtractedElement = SemanticElement;
 
-      const semanticIdAttr = 'data-llm-browser-id';
+      const semanticIdAttr = 'data-prism-id';
       const coreActions = new Set([
         'click',
         'go_back',

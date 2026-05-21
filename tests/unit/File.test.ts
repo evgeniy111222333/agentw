@@ -121,6 +121,25 @@ describe('File actions', () => {
       })
     ).rejects.toThrow(/escapes session sandbox/);
   });
+
+  it('enforces per-session file quota', async () => {
+    const tiny = new ActionExecutor(
+      { getPage: () => page } as any,
+      new Box({ root_dir: tempRoot, max_file_bytes: 1024, max_session_bytes: 10 })
+    );
+
+    await tiny.executeAction('quota-session', 'fs', undefined, {
+      operation: 'write',
+      path: '/tmp/a.txt',
+      content: '1234567890',
+    });
+
+    await expect(tiny.executeAction('quota-session', 'fs', undefined, {
+      operation: 'write',
+      path: '/tmp/b.txt',
+      content: 'x',
+    })).rejects.toThrow(/quota exceeded/i);
+  });
 });
 
 function fileHtml(): string {

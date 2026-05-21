@@ -99,6 +99,25 @@ describe('WebSocketGateway', () => {
     socket.close();
   });
 
+  it('rejects session WebSocket connections without a valid token when enforced', async () => {
+    const router = {
+      ...fakeRouter(),
+      verifyWebSocketToken: jest.fn((sessionId: string, token?: string) => token === `token:${sessionId}`),
+    };
+    const port = await start(router);
+
+    await expect(connectClosed(port, 'session-1')).resolves.toBe(1008);
+
+    const client = await connect(port, 'session-1', 'token:session-1');
+    const { socket } = client;
+    expect(await client.next()).toEqual(expect.objectContaining({
+      type: 'connected',
+      protocol: 'prism.ws.v2',
+      protocol_aliases: ['llm-browser.ws.v2'],
+    }));
+    socket.close();
+  });
+
   async function start(router: any = fakeRouter()): Promise<number> {
     server = createServer();
     gateway = new WebSocketGateway(server, router);
@@ -114,9 +133,11 @@ function fakeRouter(): any {
   };
 }
 
-function connect(port: number, sessionId: string): Promise<{ socket: WebSocket; next: () => Promise<any> }> {
+function connect(port: number, sessionId: string, token?: string): Promise<{ socket: WebSocket; next: () => Promise<any> }> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?session_id=${sessionId}`);
+    const params = new URLSearchParams({ session_id: sessionId });
+    if (token) params.set('token', token);
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?${params}`);
     sockets.push(socket);
     const messages: any[] = [];
     const waiters: Array<(message: any) => void> = [];
@@ -140,6 +161,15 @@ function connect(port: number, sessionId: string): Promise<{ socket: WebSocket; 
         });
       },
     }));
+    socket.on('error', reject);
+  });
+}
+
+function connectClosed(port: number, sessionId: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?session_id=${encodeURIComponent(sessionId)}`);
+    sockets.push(socket);
+    socket.on('close', (code) => resolve(code));
     socket.on('error', reject);
   });
 }

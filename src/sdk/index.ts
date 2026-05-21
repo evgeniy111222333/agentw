@@ -1,5 +1,5 @@
 export { BrowserClient, BrowserSession, BrowserSocket } from './BrowserClient';
-export { LlmBrowserApiError } from './errors';
+export { PrismApiError, LlmBrowserApiError } from './errors';
 export type {
   BrowserAction,
   BrowserClientContract,

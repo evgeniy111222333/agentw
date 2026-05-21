@@ -5,10 +5,12 @@ import { CommandRouter } from './CommandRouter';
 import { normalizeError } from '../common/errors';
 import { globalEventBus } from '../common/EventBus';
 import { RuntimeEventKind, StreamEvent, StreamEventType } from '../common/types';
+import { ConfigurationManager } from '../config/ConfigurationManager';
 
 interface ClientState {
   sessionId?: string;
   subscriptions: Set<string>;
+  authenticatedSessionId?: string;
 }
 
 const runtimeEventKinds: RuntimeEventKind[] = [
@@ -36,16 +38,26 @@ export class WebSocketGateway {
     this.server.on('connection', (socket, request) => {
       const requestUrl = new URL(request.url ?? '/api/v2/ws', 'http://127.0.0.1');
       const defaultSessionId = requestUrl.searchParams.get('session_id') ?? undefined;
+      const token =
+        requestUrl.searchParams.get('token') ??
+        request.headers['x-prism-ws-token']?.toString() ??
+        request.headers['x-llm-browser-ws-token']?.toString();
+      if (!this.authorizeSession(defaultSessionId, token)) {
+        socket.close(1008, 'WebSocket session token is required');
+        return;
+      }
       const initialEvents = eventSet(requestUrl.searchParams.getAll('events'));
       const state: ClientState = {
         sessionId: defaultSessionId,
         subscriptions: initialEvents,
+        authenticatedSessionId: defaultSessionId,
       };
       this.clients.set(socket, state);
 
       this.send(socket, {
         type: 'connected',
-        protocol: 'llm-browser.ws.v2',
+        protocol: 'prism.ws.v2',
+        protocol_aliases: ['llm-browser.ws.v2'],
         session_id: defaultSessionId,
         stream: {
           subscribe: true,
@@ -105,7 +117,24 @@ export class WebSocketGateway {
   private handleControlMessage(socket: WebSocket, state: ClientState, message: any): void {
     switch (message.type) {
       case 'subscribe': {
-        if (message.session_id) state.sessionId = String(message.session_id);
+        if (message.session_id) {
+          const nextSession = String(message.session_id);
+          if (!this.authorizeSession(nextSession, message.token ?? message.ws_token, state)) {
+            this.send(socket, {
+              type: 'error',
+              id: message.id,
+              timestamp: new Date().toISOString(),
+              session_id: state.sessionId,
+              error: {
+                code: 'ACCESS_DENIED',
+                message: 'WebSocket token is required for this session',
+              },
+            });
+            return;
+          }
+          state.sessionId = nextSession;
+          state.authenticatedSessionId = nextSession;
+        }
         const requested = eventSet(message.events ?? message.event ?? '*');
         for (const event of requested) state.subscriptions.add(event);
         this.send(socket, {
@@ -171,9 +200,21 @@ export class WebSocketGateway {
     }
 
     try {
+      const requestedSessionId = params?.session_id ?? defaultSessionId;
+      if (!this.authorizeSession(requestedSessionId, params?.token ?? params?.ws_token, { sessionId: defaultSessionId, subscriptions: new Set(), authenticatedSessionId: defaultSessionId })) {
+        return {
+          jsonrpc: '2.0',
+          error: {
+            code: -32003,
+            message: 'WebSocket token is required for this session',
+            data: { error_code: 'ACCESS_DENIED' },
+          },
+          id,
+        };
+      }
       const command = this.commandRouter.normalizeJsonRpc(method, {
         ...(params ?? {}),
-        session_id: params?.session_id ?? defaultSessionId,
+        session_id: requestedSessionId,
       });
       const result = await this.commandRouter.execute(command);
       return {
@@ -257,6 +298,14 @@ export class WebSocketGateway {
     if (events.has(String(event.type))) return true;
     if (events.has('runtime') && runtimeEventKindSet.has(String(event.type))) return true;
     return false;
+  }
+
+  private authorizeSession(sessionId?: string, token?: string, state?: ClientState): boolean {
+    if (!sessionId) return true;
+    if (!ConfigurationManager.getInstance().getConfig().security.websocket_auth_required) return true;
+    if (state?.authenticatedSessionId === sessionId) return true;
+    if (typeof (this.commandRouter as any).verifyWebSocketToken !== 'function') return true;
+    return (this.commandRouter as any).verifyWebSocketToken(sessionId, token);
   }
 
   private broadcastHeartbeat(): void {

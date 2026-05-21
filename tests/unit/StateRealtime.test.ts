@@ -25,8 +25,8 @@ describe('real-time state management', () => {
   });
 
   beforeEach(async () => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-browser-state-'));
-    process.env.LLM_BROWSER_CHECKPOINT_DIR = path.join(tempDir, 'checkpoints');
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prism-state-'));
+    process.env.PRISM_CHECKPOINT_DIR = path.join(tempDir, 'checkpoints');
     configManager.updateConfig({
       semantic: {
         ...configManager.getConfig().semantic,
@@ -41,7 +41,7 @@ describe('real-time state management', () => {
     await page?.close();
     page = undefined;
     fs.rmSync(tempDir, { recursive: true, force: true });
-    delete process.env.LLM_BROWSER_CHECKPOINT_DIR;
+    delete process.env.PRISM_CHECKPOINT_DIR;
   });
 
   afterAll(async () => {

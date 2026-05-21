@@ -3,7 +3,7 @@ import { ConfigurationManager } from '../src/config/ConfigurationManager';
 import { WebSocket } from 'ws';
 import { createServer, Server } from 'http';
 
-const port = Number(process.env.LLM_BROWSER_SMOKE_PORT ?? 3217);
+const port = Number(process.env.PRISM_SMOKE_PORT ?? process.env.LLM_BROWSER_SMOKE_PORT ?? 3217);
 
 async function main() {
   const configManager = ConfigurationManager.getInstance();
@@ -15,7 +15,7 @@ async function main() {
     },
     file: {
       ...config.file,
-      root_dir: `./.llm-browser/smoke-api-${port}`,
+      root_dir: `./.prism/smoke-api-${port}`,
     },
   });
 
@@ -25,13 +25,17 @@ async function main() {
   const fixtureBaseUrl = `http://127.0.0.1:${port + 100}`;
 
   let sessionId: string | undefined;
+  let sessionToken: string | undefined;
   let importedSessionId: string | undefined;
   try {
     const baseUrl = `http://127.0.0.1:${port}`;
     const sessionResponse = await fetch(`${baseUrl}/api/v2/sessions`, { method: 'POST' });
     assertOk(sessionResponse, 'create session');
-    sessionId = (await sessionResponse.json()).session_id;
+    const createdSession = await sessionResponse.json();
+    sessionId = createdSession.session_id;
+    sessionToken = createdSession.ws_token;
     if (!sessionId) throw new Error('create session response did not include session_id');
+    if (!sessionToken) throw new Error('create session response did not include ws_token');
     const activeSessionId = sessionId;
 
     const viewport = await restAction(baseUrl, activeSessionId, {
@@ -167,7 +171,7 @@ async function main() {
         async: true,
       },
     });
-    const asyncDone = await pollUntilOp(baseUrl, asyncWait.operation_id);
+    const asyncDone = await pollUntilOp(baseUrl, activeSessionId, asyncWait.operation_id);
     const rpcPoll = await rpc(baseUrl, 'poll', {
       session_id: activeSessionId,
       action_params: { operation_id: asyncWait.operation_id },
@@ -180,7 +184,7 @@ async function main() {
         async: true,
       },
     });
-    const cancelled = await cancelOp(baseUrl, cancelStart.operation_id);
+    const cancelled = await cancelOp(baseUrl, activeSessionId, cancelStart.operation_id);
 
     const click = await rpc(baseUrl, 'click', {
       session_id: activeSessionId,
@@ -255,8 +259,8 @@ async function main() {
       },
     ]);
 
-    const wsSnapshot = await wsRpc(activeSessionId, 'snapshot', {});
-    const wsStream = await wsStreamProbe(activeSessionId, () =>
+    const wsSnapshot = await wsRpc(activeSessionId, sessionToken, 'snapshot', {});
+    const wsStream = await wsStreamProbe(activeSessionId, sessionToken, () =>
       restAction(baseUrl, activeSessionId, { action: 'snapshot', params: { max_elements: 50 } })
     );
 
@@ -528,31 +532,31 @@ async function rpcBatch(baseUrl: string, body: Record<string, any>[]) {
   return result;
 }
 
-async function pollOp(baseUrl: string, operationId: string) {
-  const response = await fetch(`${baseUrl}/api/v2/ops/${operationId}`);
+async function pollOp(baseUrl: string, sessionId: string, operationId: string) {
+  const response = await fetch(`${baseUrl}/api/v2/ops/${operationId}?session_id=${encodeURIComponent(sessionId)}`);
   assertOk(response, 'poll op');
   return response.json();
 }
 
-async function pollUntilOp(baseUrl: string, operationId: string) {
+async function pollUntilOp(baseUrl: string, sessionId: string, operationId: string) {
   const started = Date.now();
   while (Date.now() - started < 5000) {
-    const status = await pollOp(baseUrl, operationId);
+    const status = await pollOp(baseUrl, sessionId, operationId);
     if (['completed', 'failed', 'cancelled'].includes(status.status)) return status;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`operation ${operationId} did not finish`);
 }
 
-async function cancelOp(baseUrl: string, operationId: string) {
-  const response = await fetch(`${baseUrl}/api/v2/ops/${operationId}/cancel`, { method: 'POST' });
+async function cancelOp(baseUrl: string, sessionId: string, operationId: string) {
+  const response = await fetch(`${baseUrl}/api/v2/ops/${operationId}/cancel?session_id=${encodeURIComponent(sessionId)}`, { method: 'POST' });
   assertOk(response, 'cancel op');
   return response.json();
 }
 
-async function wsRpc(sessionId: string, method: string, params: Record<string, any>) {
+async function wsRpc(sessionId: string, token: string, method: string, params: Record<string, any>) {
   return new Promise<any>((resolve, reject) => {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?session_id=${sessionId}`);
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`);
     const id = `${method}-ws`;
     const timer = setTimeout(() => {
       socket.close();
@@ -565,6 +569,7 @@ async function wsRpc(sessionId: string, method: string, params: Record<string, a
         method,
         params: {
           session_id: sessionId,
+          ws_token: token,
           ...params,
         },
         id,
@@ -592,9 +597,9 @@ async function wsRpc(sessionId: string, method: string, params: Record<string, a
   });
 }
 
-async function wsStreamProbe(sessionId: string, trigger: () => Promise<unknown>) {
+async function wsStreamProbe(sessionId: string, token: string, trigger: () => Promise<unknown>) {
   return new Promise<any>((resolve, reject) => {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?session_id=${sessionId}`);
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/api/v2/ws?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`);
     const seen: string[] = [];
     let triggered = false;
     const timer = setTimeout(() => {

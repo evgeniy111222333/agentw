@@ -37,7 +37,7 @@ function intersectionTrackerScript(sessionId: string): void {
   const win = window as any;
   const key = '__llmBrowserIntersectionTracker';
   if (win[key]?.sessionId === sessionId) return;
-  const semanticIdAttr = 'data-llm-browser-id';
+  const semanticIdAttr = 'data-prism-id';
   const targetId = (el: Element): string => el.getAttribute(semanticIdAttr) || el.id || el.tagName.toLowerCase();
   const observer = new IntersectionObserver((entries) => {
     win.reportIntersection?.(entries.map((entry) => ({
@@ -54,7 +54,7 @@ function intersectionTrackerScript(sessionId: string): void {
     })));
   }, { threshold: [0, 0.5, 1] });
   const observe = (root: ParentNode = document): void => {
-    root.querySelectorAll?.('img, iframe, video, audio, canvas, svg, form, input, textarea, select, button, a, [data-src], [data-lazy-src], [data-infinite-scroll], [data-llm-browser-id]')
+    root.querySelectorAll?.('img, iframe, video, audio, canvas, svg, form, input, textarea, select, button, a, [data-src], [data-lazy-src], [data-infinite-scroll], [data-prism-id]')
       .forEach((el) => observer.observe(el));
   };
   const mo = new MutationObserver((mutations) => {

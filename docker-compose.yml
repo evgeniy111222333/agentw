@@ -1,10 +1,15 @@
 services:
-  llm-browser:
+  prism:
     build:
       context: .
     ports:
       - "3001:3001"
     environment:
+      PRISM_PORT: "3001"
+      PRISM_RATE_LIMIT_PER_MINUTE: "60"
+      PRISM_NAVIGATE_RATE_LIMIT_PER_MINUTE: "10"
+      PRISM_SCREENSHOT_RATE_LIMIT_PER_MINUTE: "30"
+      PRISM_AUDIT_ENABLED: "true"
       LLM_BROWSER_PORT: "3001"
       LLM_BROWSER_RATE_LIMIT_PER_MINUTE: "60"
       LLM_BROWSER_NAVIGATE_RATE_LIMIT_PER_MINUTE: "10"

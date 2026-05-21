@@ -15,6 +15,7 @@ export interface FlowStepResult {
   duration_ms: number;
   data?: Record<string, any>;
   error?: string;
+  error_code?: string;
 }
 
 export interface FlowReport {

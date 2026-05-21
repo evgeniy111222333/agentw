@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { Page } from 'playwright';
 import { globalEventBus } from '../common/EventBus';
 import { ActionRecord, FormState, SessionState, TabState } from '../common/types';
@@ -14,7 +15,9 @@ export class StateManagementLayer {
   private formStates: Map<string, Record<string, FormState>> = new Map();
   private visibilityState: Map<string, Record<string, { visible: boolean; visible_ratio: number; updated_at: string }>> = new Map();
   private recentMutations: Map<string, any[]> = new Map();
-  private checkpointDir = process.env.LLM_BROWSER_CHECKPOINT_DIR ?? path.join(process.cwd(), '.llm-browser', 'checkpoints');
+  private checkpointExtras: Map<string, Record<string, any>> = new Map();
+  private checkpointExtrasProvider?: (sessionId: string) => Record<string, any> | undefined;
+  private checkpointDir = process.env.PRISM_CHECKPOINT_DIR ?? process.env.LLM_BROWSER_CHECKPOINT_DIR ?? path.join(process.cwd(), '.prism', 'checkpoints');
   private checkpointTimer?: NodeJS.Timeout;
 
   constructor() {
@@ -24,8 +27,16 @@ export class StateManagementLayer {
       for (const sessionId of this.sessions.keys()) {
         void this.checkpointSession(sessionId, 'periodic');
       }
-    }, Number(process.env.LLM_BROWSER_CHECKPOINT_INTERVAL_MS ?? 60000));
+    }, Number(process.env.PRISM_CHECKPOINT_INTERVAL_MS ?? process.env.LLM_BROWSER_CHECKPOINT_INTERVAL_MS ?? 60000));
     this.checkpointTimer.unref?.();
+  }
+
+  public setCheckpointExtrasProvider(provider: (sessionId: string) => Record<string, any> | undefined): void {
+    this.checkpointExtrasProvider = provider;
+  }
+
+  public getCheckpointExtras(sessionId: string): Record<string, any> {
+    return this.checkpointExtras.get(sessionId) ?? {};
   }
 
   private setupSubscriptions(): void {
@@ -77,6 +88,7 @@ export class StateManagementLayer {
         timestamp,
         debounce_ms: batch?.debounce_ms ?? 500,
         continuous: Boolean(batch?.continuous),
+        dropped: Number(batch?.dropped ?? 0),
       };
       await globalEventBus.publish('dom_mutated', payload);
       for (const mutation of mutations.slice(0, 200)) {
@@ -205,6 +217,15 @@ export class StateManagementLayer {
     this.sessions.set(sessionId, session);
   }
 
+  public purgeSession(sessionId: string): void {
+    this.sessions.delete(sessionId);
+    this.actionHistory.delete(sessionId);
+    this.formStates.delete(sessionId);
+    this.visibilityState.delete(sessionId);
+    this.recentMutations.delete(sessionId);
+    this.checkpointExtras.delete(sessionId);
+  }
+
   public listSessions(): SessionState[] {
     return Array.from(this.sessions.values());
   }
@@ -285,9 +306,10 @@ export class StateManagementLayer {
       recent_mutations: this.getRecentMutations(sessionId),
       visibility: this.getVisibilityState(sessionId),
       event_bus: globalEventBus.snapshot({ session_id: sessionId, limit: 500 }),
+      ...(this.checkpointExtrasProvider?.(sessionId) ?? {}),
     };
     await fs.promises.mkdir(this.checkpointDir, { recursive: true });
-    await fs.promises.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf8');
+    await writeCheckpointAtomic(filePath, payload);
     this.updateSession(sessionId, {
       checkpoint: {
         last_checkpoint_at: checkpointedAt,
@@ -301,13 +323,14 @@ export class StateManagementLayer {
   public restoreCheckpoint(sessionId: string): boolean {
     const filePath = path.join(this.checkpointDir, `${safeFileName(sessionId)}.json`);
     if (!fs.existsSync(filePath)) return false;
-    const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const raw = readCheckpointFile(filePath);
     if (!raw?.session?.session_id) return false;
     this.sessions.set(sessionId, { ...raw.session, session_id: sessionId, status: 'active' });
     this.actionHistory.set(sessionId, Array.isArray(raw.actions) ? raw.actions : []);
     this.formStates.set(sessionId, raw.form_states ?? {});
     this.visibilityState.set(sessionId, raw.visibility ?? {});
     this.recentMutations.set(sessionId, raw.recent_mutations ?? []);
+    this.checkpointExtras.set(sessionId, extractCheckpointExtras(raw));
     return true;
   }
 
@@ -315,7 +338,7 @@ export class StateManagementLayer {
     if (!fs.existsSync(this.checkpointDir)) return;
     for (const file of fs.readdirSync(this.checkpointDir).filter((entry) => entry.endsWith('.json'))) {
       try {
-        const raw = JSON.parse(fs.readFileSync(path.join(this.checkpointDir, file), 'utf8'));
+        const raw = readCheckpointFile(path.join(this.checkpointDir, file));
         const sessionId = raw?.session?.session_id;
         if (!sessionId || this.sessions.has(sessionId)) continue;
         this.sessions.set(sessionId, { ...raw.session, status: 'suspended' });
@@ -323,6 +346,7 @@ export class StateManagementLayer {
         this.formStates.set(sessionId, raw.form_states ?? {});
         this.visibilityState.set(sessionId, raw.visibility ?? {});
         this.recentMutations.set(sessionId, raw.recent_mutations ?? []);
+        this.checkpointExtras.set(sessionId, extractCheckpointExtras(raw));
       } catch {
         // Ignore corrupt checkpoints; they are diagnostic artifacts, not source of truth.
       }
@@ -390,16 +414,53 @@ function safeFileName(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]+/g, '_');
 }
 
+async function writeCheckpointAtomic(filePath: string, payload: Record<string, any>): Promise<void> {
+  const body = JSON.stringify(payload);
+  const wrapped = {
+    checkpoint_format: 'state-checkpoint-envelope/1.0',
+    checksum: checksum(body),
+    payload,
+  };
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.promises.writeFile(tmpPath, JSON.stringify(wrapped, null, 2), 'utf8');
+  await fs.promises.rename(tmpPath, filePath);
+}
+
+function readCheckpointFile(filePath: string): any {
+  const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  if (raw?.checkpoint_format === 'state-checkpoint-envelope/1.0') {
+    const body = JSON.stringify(raw.payload);
+    if (raw.checksum !== checksum(body)) {
+      throw new Error(`Checkpoint checksum mismatch: ${filePath}`);
+    }
+    return raw.payload;
+  }
+  return raw;
+}
+
+function checksum(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function extractCheckpointExtras(raw: any): Record<string, any> {
+  const extras: Record<string, any> = {};
+  if (raw?.scripts) extras.scripts = raw.scripts;
+  return extras;
+}
+
 function mutationObserverScript(sessionId: string): void {
   const win = window as any;
-  const key = '__llmBrowserMutationObserver';
+  const key = '__prismMutationObserver';
   if (win[key]?.sessionId === sessionId) return;
 
-  const semanticIdAttr = 'data-llm-browser-id';
+  const semanticIdAttr = 'data-prism-id';
+  const legacySemanticIdAttr = 'data-llm-browser-id';
+  const ignoredAttributes = new Set([semanticIdAttr, legacySemanticIdAttr]);
   const selectorFor = (node: Node): string | undefined => {
     if (!(node instanceof Element)) return undefined;
-    const id = node.getAttribute(semanticIdAttr) || node.id;
-    if (id) return `[${node.hasAttribute(semanticIdAttr) ? semanticIdAttr : 'id'}="${String(id).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
+    const id = node.getAttribute(semanticIdAttr) || node.getAttribute(legacySemanticIdAttr) || node.id;
+    const attr = node.hasAttribute(semanticIdAttr) ? semanticIdAttr : node.hasAttribute(legacySemanticIdAttr) ? legacySemanticIdAttr : 'id';
+    if (id) return `[${attr}="${String(id).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
     const tag = node.tagName.toLowerCase();
     const parent = node.parentElement;
     if (!parent) return tag;
@@ -409,7 +470,7 @@ function mutationObserverScript(sessionId: string): void {
   const nodeSummary = (node: Node) => {
     if (!(node instanceof Element)) return { node_type: node.nodeType, text: node.textContent?.slice(0, 160) };
     return {
-      id: node.getAttribute(semanticIdAttr) || node.id || undefined,
+      id: node.getAttribute(semanticIdAttr) || node.getAttribute(legacySemanticIdAttr) || node.id || undefined,
       selector: selectorFor(node),
       tag: node.tagName.toLowerCase(),
       text: node.textContent?.replace(/\s+/g, ' ').trim().slice(0, 160) || undefined,
@@ -418,9 +479,11 @@ function mutationObserverScript(sessionId: string): void {
   const serialize = (mutation: MutationRecord) => {
     const target = mutation.target;
     const elementTarget = target instanceof Element ? target : target.parentElement;
+    if (elementTarget?.id === 'prism-visual-cursor') return undefined;
+    if (mutation.type === 'attributes' && mutation.attributeName && ignoredAttributes.has(mutation.attributeName)) return undefined;
     return {
       type: mutation.type,
-      target_id: elementTarget?.getAttribute(semanticIdAttr) || elementTarget?.id || undefined,
+      target_id: elementTarget?.getAttribute(semanticIdAttr) || elementTarget?.getAttribute(legacySemanticIdAttr) || elementTarget?.id || undefined,
       target: selectorFor(target),
       attribute_name: mutation.attributeName ?? undefined,
       old_value: mutation.oldValue ?? undefined,
@@ -437,22 +500,31 @@ function mutationObserverScript(sessionId: string): void {
   const state = {
     sessionId,
     pending: [] as any[],
+    dropped: 0,
     debounceTimer: 0,
     continuousTimer: 0,
     observer: undefined as MutationObserver | undefined,
   };
   const flush = (continuous = false) => {
     if (!state.pending.length) return;
-    const mutations = state.pending.splice(0, 500);
+    const mutations = state.pending.splice(0, 250);
     win.reportMutation?.({
       mutations,
       timestamp: new Date().toISOString(),
       debounce_ms: 500,
       continuous,
+      dropped: state.dropped,
     });
+    state.dropped = 0;
   };
   state.observer = new MutationObserver((mutations) => {
-    state.pending.push(...mutations.map(serialize));
+    const serialized = mutations.map(serialize).filter(Boolean);
+    state.pending.push(...serialized);
+    if (state.pending.length > 1000) {
+      const overflow = state.pending.length - 1000;
+      state.pending.splice(0, overflow);
+      state.dropped += overflow;
+    }
     window.clearTimeout(state.debounceTimer);
     state.debounceTimer = window.setTimeout(() => flush(false), 500);
     if (!state.continuousTimer) {

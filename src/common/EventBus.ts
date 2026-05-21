@@ -16,6 +16,8 @@ export interface EventEnvelope {
 export interface EventBusSnapshot {
   events: EventEnvelope[];
   dropped_events: number;
+  subscriber_errors: number;
+  slow_subscriber_events: number;
   persisted_path?: string;
   last_sequence: number;
 }
@@ -26,15 +28,19 @@ export class EventBus {
   private subscribers: Map<string, EventCallback[]> = new Map();
   private events: EventEnvelope[] = [];
   private droppedEvents = 0;
+  private subscriberErrors = 0;
+  private slowSubscriberEvents = 0;
   private sequence = 0;
   private maxEvents: number;
   private persistPath?: string;
+  private readonly subscriberTimeoutMs: number;
 
   constructor(options: { maxEvents?: number; persistPath?: string | null } = {}) {
-    this.maxEvents = Math.max(1, options.maxEvents ?? Number(process.env.LLM_BROWSER_EVENT_BUFFER_SIZE ?? 10000));
+    this.maxEvents = Math.max(1, options.maxEvents ?? Number(process.env.PRISM_EVENT_BUFFER_SIZE ?? process.env.LLM_BROWSER_EVENT_BUFFER_SIZE ?? 10000));
+    this.subscriberTimeoutMs = Math.max(50, Number(process.env.PRISM_EVENT_SUBSCRIBER_TIMEOUT_MS ?? process.env.LLM_BROWSER_EVENT_SUBSCRIBER_TIMEOUT_MS ?? 1000));
     const configuredPath = options.persistPath === null
       ? undefined
-      : options.persistPath ?? process.env.LLM_BROWSER_EVENT_LOG_PATH ?? path.join(process.cwd(), '.llm-browser', 'events', 'events.jsonl');
+      : options.persistPath ?? process.env.PRISM_EVENT_LOG_PATH ?? process.env.LLM_BROWSER_EVENT_LOG_PATH ?? path.join(process.cwd(), '.prism', 'events', 'events.jsonl');
     this.persistPath = configuredPath;
     this.loadPersisted();
   }
@@ -65,8 +71,10 @@ export class EventBus {
     if (callbacks) {
       for (const callback of callbacks) {
         try {
-          await callback(payload);
+          await withTimeout(Promise.resolve(callback(payload)), this.subscriberTimeoutMs);
         } catch (error) {
+          this.subscriberErrors += 1;
+          if (/timed out/i.test(String((error as Error).message))) this.slowSubscriberEvents += 1;
           console.error(`Error processing event ${eventType}:`, error);
         }
       }
@@ -84,6 +92,8 @@ export class EventBus {
     return {
       events: this.list(filter),
       dropped_events: this.droppedEvents,
+      subscriber_errors: this.subscriberErrors,
+      slow_subscriber_events: this.slowSubscriberEvents,
       persisted_path: this.persistPath,
       last_sequence: this.sequence,
     };
@@ -92,6 +102,8 @@ export class EventBus {
   clear(): void {
     this.events = [];
     this.droppedEvents = 0;
+    this.subscriberErrors = 0;
+    this.slowSubscriberEvents = 0;
     this.sequence = 0;
   }
 
@@ -142,3 +154,16 @@ export class EventBus {
 }
 
 export const globalEventBus = new EventBus();
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Event subscriber timed out after ${timeoutMs}ms`)), timeoutMs);
+      timer.unref?.();
+    }),
+  ]);
+}

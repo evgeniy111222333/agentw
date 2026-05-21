@@ -1,7 +1,7 @@
 {
-  "name": "llm-browser",
+  "name": "prism-browser",
   "version": "1.0.0",
-  "description": "Semantic browser runtime for LLM agents",
+  "description": "Prism semantic browser runtime for agents",
   "main": "dist/index.js",
   "exports": {
     ".": "./dist/index.js",

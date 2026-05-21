@@ -414,7 +414,7 @@ async function describeFrame(frame: Frame, pageUrl: string, depth: number): Prom
   const handle = await frame.frameElement().catch(() => undefined);
   const element = handle
     ? await handle.evaluate((el: Element) => {
-        const semanticIdAttr = 'data-llm-browser-id';
+        const semanticIdAttr = 'data-prism-id';
         const html = el as HTMLIFrameElement;
         const rect = html.getBoundingClientRect();
         const id = html.id || html.getAttribute(semanticIdAttr) || undefined;
@@ -537,7 +537,7 @@ function mapQuery(value: string): string | undefined {
 
 function evaluateDom(input: { config: any; context: any }): TraversalResult {
   const { config, context: rootContext } = input;
-  const semanticIdAttr = 'data-llm-browser-id';
+  const semanticIdAttr = 'data-prism-id';
   const windowWithState = window as unknown as { __llmBrowserNextId?: number; __llmBrowserShadowRoots?: any };
   windowWithState.__llmBrowserNextId ??= 1;
 
@@ -813,7 +813,10 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
   };
   const rawDomWithShadow = (all: Array<{ el: HTMLElement }>): string => {
     const clone = document.documentElement?.cloneNode(true) as Element | undefined;
-    for (const el of Array.from(clone?.querySelectorAll('[data-llm-browser-id]') ?? [])) el.removeAttribute('data-llm-browser-id');
+    for (const el of Array.from(clone?.querySelectorAll('[data-prism-id], [data-llm-browser-id]') ?? [])) {
+      el.removeAttribute('data-prism-id');
+      el.removeAttribute('data-llm-browser-id');
+    }
     const shadowHtml = all
       .map(({ el }) => {
         const root = el.shadowRoot ?? windowWithState.__llmBrowserShadowRoots?.rootFor?.(el);
@@ -1638,7 +1641,10 @@ function evaluateDom(input: { config: any; context: any }): TraversalResult {
   };
 
   if (rootContext.targetSelector) {
-    const targetEl = document.querySelector(`[data-llm-browser-id="${rootContext.targetSelector}"]`) || document.querySelector(rootContext.targetSelector);
+    const targetEl =
+      document.querySelector(`[data-prism-id="${rootContext.targetSelector}"]`) ||
+      document.querySelector(`[data-llm-browser-id="${rootContext.targetSelector}"]`) ||
+      document.querySelector(rootContext.targetSelector);
     if (targetEl && targetEl.parentNode) {
       // Walk the target element itself by passing its parent and filtering in the walk,
       // or just add it to entries. For simplicity, if we have a target, we just want it and its subtree.
@@ -1984,7 +1990,8 @@ function sameOriginInPage(parentUrl: string, childUrl: string): boolean {
 
 function rawDomWithShadow(entries: Array<{ el: HTMLElement }>): string {
   const clone = document.documentElement?.cloneNode(true) as Element | undefined;
-  for (const el of Array.from(clone?.querySelectorAll('[data-llm-browser-id]') ?? [])) {
+  for (const el of Array.from(clone?.querySelectorAll('[data-prism-id], [data-llm-browser-id]') ?? [])) {
+    el.removeAttribute('data-prism-id');
     el.removeAttribute('data-llm-browser-id');
   }
   const shadowHtml = entries

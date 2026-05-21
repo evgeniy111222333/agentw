@@ -1,7 +1,7 @@
 [project]
-name = "llm-browser-sdk"
+name = "prism-browser-sdk"
 version = "0.1.0"
-description = "Python SDK for the LLM Browser runtime"
+description = "Python SDK for the Prism runtime"
 requires-python = ">=3.10"
 dependencies = []
 

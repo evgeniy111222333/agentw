@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { BrowserCore } from '../layer1_browser_core/BrowserCore';
 import { ActionExecutor, ActionExecutionResult } from '../layer2_action_execution/ActionExecutor';
 import { ActionValidator } from '../layer2_action_execution/ActionValidator';
@@ -13,7 +13,7 @@ import { globalAuditLog, riskScoreForAction } from '../common/AuditLog';
 import { SecurityPolicy } from '../security/SecurityPolicy';
 import { OpStart, OpStatus, OpStore } from '../op/Op';
 import { globalTraceStore } from '../trace/Trace';
-import { activeTab, snapKey } from '../session/Tabs';
+import { activeTab, deleteSessionSnaps, snapKey } from '../session/Tabs';
 import { ConfigurationManager } from '../config/ConfigurationManager';
 import { Bouncer } from '../layer2_action_execution/Bouncer';
 
@@ -249,6 +249,9 @@ const actionSchemas: Record<string, ActionSchema> = {
 };
 
 export class CommandRouter {
+  private sessionQueues = new Map<string, Promise<unknown>>();
+  private readonly wsSecret = process.env.PRISM_WS_SECRET ?? process.env.LLM_BROWSER_WS_SECRET ?? randomBytes(32).toString('hex');
+
   constructor(
     private browserCore: BrowserCore,
     private stateManager: StateManagementLayer,
@@ -273,21 +276,40 @@ export class CommandRouter {
       }, 'async_navigate');
     }
     if (command.action_params?.async === true) return this.start(command);
-    return this.executeSync(command);
+    return this.enqueueSession(command.session_id, () => this.executeSync(command));
   }
 
   listOps(sessionId?: string): OpStatus<CommandResult>[] {
     return this.ops.list({ session_id: sessionId }).map((record) => this.ops.toStatus(record));
   }
 
-  getOp(operationId: string): OpStatus<CommandResult> | undefined {
-    const record = this.ops.get(operationId);
+  getOp(operationId: string, sessionId?: string): OpStatus<CommandResult> | undefined {
+    const record = sessionId ? this.ops.getForSession(operationId, sessionId) : this.ops.get(operationId);
     return record ? this.ops.toStatus(record) : undefined;
   }
 
-  cancelOp(operationId: string): OpStatus<CommandResult> | undefined {
-    const record = this.ops.cancel(operationId);
+  cancelOp(operationId: string, sessionId?: string): OpStatus<CommandResult> | undefined {
+    const record = sessionId ? this.ops.cancelForSession(operationId, sessionId) : this.ops.cancel(operationId);
     return record ? this.ops.toStatus(record) : undefined;
+  }
+
+  cleanupSession(sessionId: string): void {
+    this.ops.clearSession(sessionId);
+    this.actionExecutor.clearSession(sessionId);
+    deleteSessionSnaps(this.previousSnapshots, sessionId);
+    this.sessionQueues.delete(sessionId);
+  }
+
+  issueWebSocketToken(sessionId: string): string {
+    return createHmac('sha256', this.wsSecret).update(sessionId).digest('hex');
+  }
+
+  verifyWebSocketToken(sessionId: string | undefined, token: string | undefined): boolean {
+    if (!sessionId || !token) return false;
+    const expected = this.issueWebSocketToken(sessionId);
+    const expectedBuffer = Buffer.from(expected, 'hex');
+    const actualBuffer = Buffer.from(String(token), 'hex');
+    return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
   }
 
   private async start(command: AgentCommand, opAction = command.action): Promise<OpStart> {
@@ -315,12 +337,12 @@ export class CommandRouter {
         const page = this.browserCore.getPage(command.session_id);
         await page.evaluate(() => window.stop()).catch(() => undefined);
       },
-      run: () => this.executeSync(asyncCommand, {
-        traceId,
-        resolvedAction,
-        securityDecision: { rate_limit: undefined },
-        skipSecurity: true,
-      }),
+      run: () => this.enqueueSession(command.session_id, () => this.executeSync(asyncCommand, {
+          traceId,
+          resolvedAction,
+          securityDecision: { rate_limit: undefined },
+          skipSecurity: true,
+        })),
     });
 
     globalMetrics.increment('llm_browser_ops_started_total');
@@ -354,7 +376,7 @@ export class CommandRouter {
   private poll(command: AgentCommand): OpStatus<CommandResult> {
     const operationId = command.action_params?.operation_id;
     if (!operationId) throw new LlmBrowserError('MISSING_PARAM', 'operation_id is required for poll');
-    const status = this.getOp(String(operationId));
+    const status = this.getOp(String(operationId), command.session_id);
     if (!status) throw new LlmBrowserError('ELEMENT_NOT_FOUND', 'Operation not found', { operation_id: operationId });
     if (status.result?.snapshot) {
       this.previousSnapshots.set(
@@ -368,7 +390,7 @@ export class CommandRouter {
   private cancel(command: AgentCommand): OpStatus<CommandResult> {
     const operationId = command.action_params?.operation_id;
     if (!operationId) throw new LlmBrowserError('MISSING_PARAM', 'operation_id is required for cancel');
-    const status = this.cancelOp(String(operationId));
+    const status = this.cancelOp(String(operationId), command.session_id);
     if (!status) throw new LlmBrowserError('ELEMENT_NOT_FOUND', 'Operation not found', { operation_id: operationId });
     globalMetrics.increment('llm_browser_ops_cancelled_total');
     return status;
@@ -443,6 +465,14 @@ export class CommandRouter {
       if (activeAction.executionAction !== 'snapshot') {
         const active = activeTab(this.stateManager.getSessionState(command.session_id));
         const previousSnapshot = active ? this.previousSnapshots.get(snapKey(command.session_id, active.tab_id)) : undefined;
+        const expectedSnapshotId = activeAction.params.expected_snapshot_id ?? activeAction.params.snapshot_id;
+        if (expectedSnapshotId && previousSnapshot?.snapshot_id !== expectedSnapshotId) {
+          throw new LlmBrowserError('STALE_ELEMENT', 'Snapshot version is stale for this action', {
+            expected_snapshot_id: expectedSnapshotId,
+            current_snapshot_id: previousSnapshot?.snapshot_id,
+            tab_id: active?.tab_id,
+          });
+        }
         const validation = this.traceSync(
           traceId,
           'validator.preflight',
@@ -785,6 +815,18 @@ export class CommandRouter {
     return this.actionExecutor.executeAction(sessionId, action, targetId, params);
   }
 
+  private enqueueSession<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    if (!sessionId) return work();
+    const previous = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(work);
+    const tracked = current.catch(() => undefined).finally(() => {
+      if (this.sessionQueues.get(sessionId) === current) this.sessionQueues.delete(sessionId);
+      if (this.sessionQueues.get(sessionId) === tracked) this.sessionQueues.delete(sessionId);
+    });
+    this.sessionQueues.set(sessionId, tracked);
+    return current;
+  }
+
   private validateCommand(command: AgentCommand): ResolvedAction {
     if (!command.session_id || !this.stateManager.getSessionState(command.session_id)) {
       throw new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found', { session_id: command.session_id });
@@ -911,7 +953,7 @@ export class CommandRouter {
   }
 
   private recordAction(record: ActionRecord): void {
-    this.stateManager.recordAction(record);
+    this.stateManager.recordAction(sanitizeActionRecord(record));
   }
 
   private traceSync<T>(traceId: string, name: string, attributes: Record<string, any>, work: () => T): T {
@@ -1073,4 +1115,26 @@ function stringArray(value: unknown): string[] | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (Array.isArray(value)) return value.map(String).filter(Boolean);
   return String(value).split(',').map((entry) => entry.trim()).filter(Boolean);
+}
+
+const SENSITIVE_KEY_PATTERN = /(password|passwd|pwd|secret|token|api[_-]?key|authorization|cookie|credential|session|jwt|refresh|access[_-]?token)/i;
+
+function sanitizeActionRecord(record: ActionRecord): ActionRecord {
+  return {
+    ...record,
+    params: record.params ? sanitizeValue(record.params) as Record<string, any> : record.params,
+  };
+}
+
+function sanitizeValue(value: unknown, key = ''): unknown {
+  if (SENSITIVE_KEY_PATTERN.test(key)) return '[redacted]';
+  if (Array.isArray(value)) return value.map((entry) => sanitizeValue(entry, key));
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) {
+      result[childKey] = sanitizeValue(childValue, childKey);
+    }
+    return result;
+  }
+  return value;
 }

@@ -45,7 +45,7 @@ function formTrackerScript(sessionId: string): void {
   const key = '__llmBrowserFormTracker';
   if (win[key]?.sessionId === sessionId) return;
 
-  const semanticIdAttr = 'data-llm-browser-id';
+  const semanticIdAttr = 'data-prism-id';
   const controlSelector = 'input, select, textarea';
   const mask = (field: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement, value: any): any => {
     if (field instanceof HTMLInputElement && ['password', 'hidden'].includes(field.type)) return value ? '[masked]' : value;

@@ -144,6 +144,7 @@ export class SemanticLayer {
       ? {
           ...cacheSeed,
           key: [
+            `session=${options.session.session_id}`,
             cacheSeed.key,
             requestedMaxElements ?? config.max_elements,
             config.adaptive_max_elements ? 'adaptive' : 'fixed',

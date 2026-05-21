@@ -36,30 +36,49 @@ export class BrowserCore {
     
     const config = ConfigurationManager.getInstance().getConfig().browser;
     const viewport = { ...normalizeView(options.viewport, defaultView(config)), mode: 'context' as const };
-    const context = await this.browser.newContext({
-      viewport: { width: viewport.width, height: viewport.height },
-      deviceScaleFactor: viewport.device_scale_factor,
-      isMobile: viewport.is_mobile,
-      hasTouch: viewport.has_touch,
-      userAgent: viewport.user_agent ?? config.user_agent,
-      ignoreHTTPSErrors: config.ignore_https_errors,
-      storageState: options.storageState,
-    });
-    await context.addInitScript(shadowDomHook);
-    
-    this.contexts.set(sessionId, context);
-    this.pages.set(sessionId, new Map());
-    this.viewports.set(sessionId, viewport);
-    const page = await context.newPage();
-    this.registerPage(sessionId, page, 'tab-1');
-    this.activeTabs.set(sessionId, 'tab-1');
-    this.tabSeq.set(sessionId, 1);
-    context.on('page', (newPage) => {
-      const tabId = this.registerPage(sessionId, newPage);
-      this.activeTabs.set(sessionId, tabId);
-    });
-    if (options.url) {
-      await page.goto(options.url, { waitUntil: 'load' });
+    let context: BrowserContext | undefined;
+    try {
+      context = await this.browser.newContext({
+        viewport: { width: viewport.width, height: viewport.height },
+        deviceScaleFactor: viewport.device_scale_factor,
+        isMobile: viewport.is_mobile,
+        hasTouch: viewport.has_touch,
+        userAgent: viewport.user_agent ?? config.user_agent,
+        ignoreHTTPSErrors: config.ignore_https_errors,
+        storageState: options.storageState,
+      });
+      await context.addInitScript(shadowDomHook);
+
+      this.contexts.set(sessionId, context);
+      this.pages.set(sessionId, new Map());
+      this.viewports.set(sessionId, viewport);
+      const page = await context.newPage();
+      this.registerPage(sessionId, page, 'tab-1');
+      this.activeTabs.set(sessionId, 'tab-1');
+      this.tabSeq.set(sessionId, 1);
+      context.on('page', (newPage) => {
+        const tabId = this.registerPage(sessionId, newPage);
+        this.activeTabs.set(sessionId, tabId);
+      });
+      if (options.url) {
+        const response = await page.goto(options.url, { waitUntil: 'load' });
+        if (response && response.status() >= 400) {
+          throw new LlmBrowserError('NAVIGATION_FAILED', `Navigation returned HTTP ${response.status()} for ${options.url}`, {
+            url: options.url,
+            http_status: response.status(),
+            status_text: response.statusText(),
+          });
+        }
+      }
+    } catch (error) {
+      await context?.close().catch(() => undefined);
+      this.contexts.delete(sessionId);
+      this.pages.delete(sessionId);
+      this.activeTabs.delete(sessionId);
+      this.tabSeq.delete(sessionId);
+      this.viewports.delete(sessionId);
+      this.events.clear(sessionId);
+      throw error;
     }
   }
 
@@ -152,9 +171,15 @@ export class BrowserCore {
     return this.events.stats(sessionId);
   }
 
-  async navigate(sessionId: string, url: string): Promise<void> {
+  async navigate(sessionId: string, url: string): Promise<{ url: string; http_status?: number; http_ok?: boolean; status_text?: string }> {
     const page = this.getPage(sessionId);
-    await page.goto(url, { waitUntil: 'load' });
+    const response = await page.goto(url, { waitUntil: 'load' });
+    return {
+      url: page.url(),
+      http_status: response?.status(),
+      status_text: response?.statusText(),
+      http_ok: response ? response.ok() : undefined,
+    };
   }
 
   async listTabs(sessionId: string): Promise<TabState[]> {

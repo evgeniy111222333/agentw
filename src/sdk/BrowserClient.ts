@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { LlmBrowserApiError, isRetryableError } from './errors';
+import { LlmBrowserApiError, PrismApiError, isRetryableError } from './errors';
 import {
   BrowserAction,
   BrowserClientOptions,
@@ -44,7 +44,7 @@ export class BrowserClient {
       method: 'POST',
       body: Object.keys(options).length > 0 ? options : undefined,
     });
-    return new BrowserSession(this, response.session_id);
+    return new BrowserSession(this, response.session_id, response.ws_token);
   }
 
   async listSessions(page = 1, limit = 20): Promise<Pagination<SessionState>> {
@@ -63,7 +63,7 @@ export class BrowserClient {
         package: pack,
       },
     });
-    return new BrowserSession(this, response.session_id);
+    return new BrowserSession(this, response.session_id, response.ws_token);
   }
 
   async listPlugins(page = 1, limit = 20): Promise<Pagination<PluginRuntimeInfo>> {
@@ -191,12 +191,14 @@ export class BrowserClient {
     });
   }
 
-  async getOp(operationId: string): Promise<OpStatus> {
-    return this.request(`/api/v2/ops/${encodeURIComponent(operationId)}`);
+  async getOp(operationId: string, sessionId?: string): Promise<OpStatus> {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return this.request(`/api/v2/ops/${encodeURIComponent(operationId)}${query}`);
   }
 
-  async cancelOp(operationId: string): Promise<OpStatus> {
-    return this.request(`/api/v2/ops/${encodeURIComponent(operationId)}/cancel`, {
+  async cancelOp(operationId: string, sessionId?: string): Promise<OpStatus> {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return this.request(`/api/v2/ops/${encodeURIComponent(operationId)}/cancel${query}`, {
       method: 'POST',
     });
   }
@@ -241,8 +243,10 @@ export class BrowserClient {
     return body;
   }
 
-  connectWebSocket(sessionId: string): BrowserSocket {
-    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/api/v2/ws?session_id=${encodeURIComponent(sessionId)}`;
+  connectWebSocket(sessionId: string, token?: string): BrowserSocket {
+    const params = new URLSearchParams({ session_id: sessionId });
+    if (token) params.set('token', token);
+    const wsUrl = `${this.baseUrl.replace(/^http/, 'ws')}/api/v2/ws?${params}`;
     return new BrowserSocket(wsUrl, this.timeoutMs);
   }
 
@@ -289,7 +293,7 @@ export class BrowserClient {
 }
 
 export class BrowserSession {
-  constructor(private client: BrowserClient, readonly id: string) {}
+  constructor(private client: BrowserClient, readonly id: string, readonly wsToken?: string) {}
 
   snapshot(options: { max_elements?: number } = {}): Promise<CommandResult> {
     return this.client.getSnapshot(this.id, options);
@@ -503,15 +507,15 @@ export class BrowserSession {
   }
 
   poll(operationId: string): Promise<OpStatus> {
-    return this.client.getOp(operationId);
+    return this.client.getOp(operationId, this.id);
   }
 
   cancel(operationId: string): Promise<OpStatus> {
-    return this.client.cancelOp(operationId);
+    return this.client.cancelOp(operationId, this.id);
   }
 
   socket(): BrowserSocket {
-    return this.client.connectWebSocket(this.id);
+    return this.client.connectWebSocket(this.id, this.wsToken);
   }
 
   close(): Promise<void> {
@@ -550,7 +554,7 @@ export class BrowserSocket {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new LlmBrowserApiError(`WebSocket ${method} timed out`, 'TIMEOUT_ACTION', 408, true));
+        reject(new PrismApiError(`WebSocket ${method} timed out`, 'TIMEOUT_ACTION', 408, true));
       }, this.timeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
@@ -600,7 +604,7 @@ export class BrowserSocket {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new LlmBrowserApiError(`WebSocket ${type} timed out`, 'TIMEOUT_ACTION', 408, true));
+        reject(new PrismApiError(`WebSocket ${type} timed out`, 'TIMEOUT_ACTION', 408, true));
       }, this.timeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
@@ -642,7 +646,7 @@ export class BrowserSocket {
 async function apiErrorFromResponse(response: Response): Promise<LlmBrowserApiError> {
   const body = await response.json().catch(() => ({}));
   const error = body.error ?? {};
-  return new LlmBrowserApiError(
+  return new PrismApiError(
     error.message ?? `HTTP ${response.status}`,
     error.code ?? 'HTTP_ERROR',
     response.status,
@@ -652,7 +656,7 @@ async function apiErrorFromResponse(response: Response): Promise<LlmBrowserApiEr
 }
 
 function apiErrorFromJsonRpc(error: any): LlmBrowserApiError {
-  return new LlmBrowserApiError(
+  return new PrismApiError(
     error.message ?? 'JSON-RPC error',
     error.data?.error_code ?? String(error.code ?? 'JSON_RPC_ERROR'),
     undefined,
@@ -662,7 +666,7 @@ function apiErrorFromJsonRpc(error: any): LlmBrowserApiError {
 }
 
 function streamError(error: any): LlmBrowserApiError {
-  return new LlmBrowserApiError(
+  return new PrismApiError(
     error?.message ?? 'WebSocket stream error',
     error?.code ?? 'WS_STREAM_ERROR',
     undefined,
@@ -674,7 +678,7 @@ function streamError(error: any): LlmBrowserApiError {
 function normalizeTransportError(error: unknown): unknown {
   if (error instanceof LlmBrowserApiError) return error;
   if (error instanceof Error && error.name === 'AbortError') {
-    return new LlmBrowserApiError('Request timed out', 'TIMEOUT_ACTION', 408, true);
+    return new PrismApiError('Request timed out', 'TIMEOUT_ACTION', 408, true);
   }
   return error;
 }

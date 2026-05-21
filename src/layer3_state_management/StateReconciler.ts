@@ -147,7 +147,7 @@ export class StateReconciler {
       let count = 0;
       while (node && count < 200) {
         const el = node as Element;
-        const id = el.getAttribute('data-llm-browser-id') || el.id;
+        const id = el.getAttribute('data-prism-id') || el.getAttribute('data-llm-browser-id') || el.id;
         if (id) {
           elements.push({ id, type: el.tagName.toLowerCase() });
           count++;

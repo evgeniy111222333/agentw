@@ -3,7 +3,7 @@ import { ConfigurationManager } from '../src/config/ConfigurationManager';
 import { BrowserClient } from '../src/sdk';
 import { createServer, Server } from 'http';
 
-const port = Number(process.env.LLM_BROWSER_SDK_SMOKE_PORT ?? 3227);
+const port = Number(process.env.PRISM_SDK_SMOKE_PORT ?? process.env.LLM_BROWSER_SDK_SMOKE_PORT ?? 3227);
 
 async function main() {
   const configManager = ConfigurationManager.getInstance();
@@ -15,7 +15,7 @@ async function main() {
     },
     file: {
       ...config.file,
-      root_dir: `./.llm-browser/smoke-sdk-${port}`,
+      root_dir: `./.prism/smoke-sdk-${port}`,
     },
   });
 

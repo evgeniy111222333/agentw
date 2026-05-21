@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * MCP Server entry point — run this to expose LLM Browser as an MCP tool server.
+ * MCP Server entry point — run this to expose Prism as an MCP tool server.
  *
  * Usage:
  *   npx ts-node src/mcp/index.ts
@@ -10,7 +10,7 @@
  * Configure in Claude Desktop's claude_desktop_config.json:
  * {
  *   "mcpServers": {
- *     "llm-browser": {
+ *     "prism": {
  *       "command": "node",
  *       "args": ["/path/to/agentw/dist/mcp/index.js"]
  *     }

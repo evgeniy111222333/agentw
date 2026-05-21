@@ -1,5 +1,6 @@
 import { EventBusSnapshot } from '../common/EventBus';
 import { ActionRecord, FormState, SemanticSnapshot, SessionState, ViewportState } from '../common/types';
+import { FlowStep } from '../flow/Flow';
 
 export const SESSION_PACK_VERSION = 'session-pack/1.0';
 
@@ -19,6 +20,7 @@ export interface SessionPack {
   snapshot?: SemanticSnapshot;
   form_states?: Record<string, FormState>;
   event_bus?: EventBusSnapshot;
+  scripts?: Record<string, { steps: FlowStep[]; params: string[] }>;
 }
 
 export function makePack(input: {
@@ -29,6 +31,7 @@ export function makePack(input: {
   snapshot?: SemanticSnapshot;
   formStates?: Record<string, FormState>;
   eventBus?: EventBusSnapshot;
+  scripts?: Record<string, { steps: FlowStep[]; params: string[] }>;
 }): SessionPack {
   return {
     version: SESSION_PACK_VERSION,
@@ -42,6 +45,7 @@ export function makePack(input: {
     snapshot: input.snapshot ? clone(input.snapshot) : undefined,
     form_states: clone(input.formStates ?? input.session.form_states ?? {}),
     event_bus: input.eventBus ? clone(input.eventBus) : undefined,
+    scripts: input.scripts ? clone(input.scripts) : undefined,
   };
 }
 
@@ -70,6 +74,7 @@ export function readPack(raw: any): SessionPack {
     snapshot: pack.snapshot ? clone(pack.snapshot) : undefined,
     form_states: pack.form_states ? clone(pack.form_states) : pack.session.form_states ? clone(pack.session.form_states) : undefined,
     event_bus: pack.event_bus ? clone(pack.event_bus) : undefined,
+    scripts: pack.scripts ? clone(pack.scripts) : undefined,
   };
 }
 

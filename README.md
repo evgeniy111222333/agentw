@@ -1,6 +1,6 @@
-# LLM Browser
+# Prism
 
-Semantic browser runtime for LLM agents. It exposes REST, JSON-RPC, and WebSocket APIs that return semantic snapshots, available actions, deltas, metrics, and audit events.
+Semantic browser runtime for agents. It exposes REST, JSON-RPC, WebSocket, and MCP APIs that return semantic snapshots, available actions, deltas, metrics, audit events, and live visual/browser state.
 
 ## Local Development
 
@@ -40,12 +40,12 @@ Default API:
 - `GET /api/v2/plugins`
 - `GET /api/v2/ops`
 - `GET /metrics`
-- `WS /api/v2/ws?session_id=...`
+- `WS /api/v2/ws?session_id=...&token=...`
 
 ## TypeScript SDK
 
 ```ts
-import { BrowserClient } from 'llm-browser/sdk';
+import { BrowserClient } from 'prism-browser/sdk';
 
 const client = new BrowserClient({ baseUrl: 'http://127.0.0.1:3001' });
 const session = await client.createSession();
@@ -62,7 +62,7 @@ await session.close();
 
 ## Python SDK
 
-The Python SDK lives in `python/llm_browser` and uses the standard library only. It includes sync and async clients for sessions, actions, snapshots, tabs, events, auth, diagnostics, traces, ops, audit, plugins, and semantic cache. From a source checkout, run with `PYTHONPATH=python` or install the package from `python/`.
+The Python SDK package is `prism-browser-sdk`. Its import path remains `llm_browser` for compatibility and uses the standard library only. It includes sync and async clients for sessions, actions, snapshots, tabs, events, auth, diagnostics, traces, ops, audit, plugins, and semantic cache. From a source checkout, run with `PYTHONPATH=python` or install the package from `python/`.
 
 ```py
 from llm_browser import BrowserClient
@@ -112,7 +112,7 @@ REST endpoint:
 
 ## Snapshot Budget and Privacy
 
-Snapshots use an adaptive element budget by default. Clients can request a tighter or larger snapshot with `max_elements`; the runtime clamps it to `LLM_BROWSER_MAX_ELEMENTS_HARD_LIMIT` and reports the effective values in `snapshot.meta`.
+Snapshots use an adaptive element budget by default. Clients can request a tighter or larger snapshot with `max_elements`; the runtime clamps it to `PRISM_MAX_ELEMENTS_HARD_LIMIT` and reports the effective values in `snapshot.meta`.
 
 ```ts
 const compact = await session.snapshot({ max_elements: 120 });
@@ -127,7 +127,7 @@ REST endpoint:
 
 ## Encapsulation
 
-Semantic extraction crosses browser encapsulation boundaries with explicit context. Same-origin iframes are traversed up to `LLM_BROWSER_MAX_FRAME_DEPTH` and their children keep `origin: "iframe:..."` plus frame context. Cross-origin payment, CAPTCHA, auth, and media embeds are represented as metadata-only `iframe` or `embed` elements; ad iframes are filtered before they reach the snapshot. Open Shadow DOM and captured closed Shadow DOM are traversed with `origin: "shadow:<host_id>"`, `shadow_host` elements, and slot links via `slot_for` / `slotted_in`.
+Semantic extraction crosses browser encapsulation boundaries with explicit context. Same-origin iframes are traversed up to `PRISM_MAX_FRAME_DEPTH` and their children keep `origin: "iframe:..."` plus frame context. Cross-origin payment, CAPTCHA, auth, and media embeds are represented as metadata-only `iframe` or `embed` elements; ad iframes are filtered before they reach the snapshot. Open Shadow DOM and captured closed Shadow DOM are traversed with `origin: "shadow:<host_id>"`, `shadow_host` elements, and slot links via `slot_for` / `slotted_in`.
 
 `snapshot.meta.encapsulation` reports iframe/shadow counts, extracted frames, skipped ads, depth limits, and closed shadow roots. Actions resolve targets across same-origin frames and open/captured shadow trees, so IDs returned in the semantic snapshot remain executable.
 
@@ -153,7 +153,7 @@ Core action:
 ## Tabs
 
 Sessions can hold multiple isolated pages in one browser context. The active tab is reflected in `snapshot.session.tab_id`, and deltas are tracked per tab so snapshots from different tabs are not compared to each other.
-Runtime caps protect heavy pages: `LLM_BROWSER_MAX_SESSIONS`, `LLM_BROWSER_MAX_TABS_PER_SESSION`, and `LLM_BROWSER_MEMORY_LIMIT_MB` reject new work before Chromium exhausts memory. Idle sessions are closed after `LLM_BROWSER_SESSION_TIMEOUT_SECONDS`.
+Runtime caps protect heavy pages: `PRISM_MAX_SESSIONS`, `PRISM_MAX_TABS_PER_SESSION`, and `PRISM_MEMORY_LIMIT_MB` reject new work before Chromium exhausts memory. Idle sessions are closed after `PRISM_SESSION_TIMEOUT_SECONDS`.
 
 ```ts
 const second = await session.openTab('https://example.com/docs');
@@ -179,6 +179,7 @@ await session.clearEvents();
 ```
 
 WebSocket clients can subscribe to live stream events instead of polling. Supported stream types include runtime kinds plus `page_changed`, `action_completed`, `error`, and `heartbeat`.
+Session creation returns `ws_token`; the SDK attaches it automatically, and raw WebSocket clients pass it as `token` or `x-prism-ws-token`.
 
 ```ts
 const socket = session.socket();
@@ -192,7 +193,7 @@ REST endpoints:
 
 - `GET /api/v2/sessions/:id/events`
 - `DELETE /api/v2/sessions/:id/events`
-- `WS /api/v2/ws?session_id=...` with `subscribe`, `unsubscribe`, `replay`, and `ping`
+- `WS /api/v2/ws?session_id=...&token=...` with `subscribe`, `unsubscribe`, `replay`, and `ping`
 
 ## File Actions
 
@@ -310,7 +311,7 @@ Agent workflows can run as one declarative request. Actions are validated in thr
 - `define_script` and `call_script` register parameterized reusable action sequences.
 - `try` runs fallback actions by `error_code`.
 
-Targeted `available_actions` include `preconditions` such as `element_visible`, `element_enabled`, `element_stable`, `no_modal_open`, and `page_loaded`, plus both `risk` and numeric `risk_score`. During configured degradation (`LLM_BROWSER_DEGRADATION_LEVEL=moderate|severe`), medium/high-risk actions are blocked before browser execution.
+Targeted `available_actions` include `preconditions` such as `element_visible`, `element_enabled`, `element_stable`, `no_modal_open`, and `page_loaded`, plus both `risk` and numeric `risk_score`. During configured degradation (`PRISM_DEGRADATION_LEVEL=moderate|severe`), medium/high-risk actions are blocked before browser execution.
 
 Retry follows the concept error classes: transient failures retry with 100/200/400 ms backoff, external failures with 1000/2000/4000 ms backoff, and permanent validation/lookup failures do not retry. Retry attempts publish `action_retry` stream events with remaining attempts and error classification.
 
@@ -363,19 +364,21 @@ docker compose up --build
 
 Useful environment variables:
 
-- `LLM_BROWSER_PORT`
-- `LLM_BROWSER_RATE_LIMIT_PER_MINUTE`
-- `LLM_BROWSER_NAVIGATE_RATE_LIMIT_PER_MINUTE`
-- `LLM_BROWSER_SCREENSHOT_RATE_LIMIT_PER_MINUTE`
-- `LLM_BROWSER_DOMAIN_WHITELIST`
-- `LLM_BROWSER_DOMAIN_BLACKLIST`
-- `LLM_BROWSER_AUDIT_ENABLED`
-- `LLM_BROWSER_PLUGINS_ENABLED`
-- `LLM_BROWSER_SAM_ENABLED`
-- `LLM_BROWSER_PLUGINS_DIR`
-- `LLM_BROWSER_FILE_ROOT`
-- `LLM_BROWSER_MAX_FILE_BYTES`
-- `LLM_BROWSER_FILE_DELETE_ENABLED`
-- `LLM_BROWSER_SEMANTIC_CACHE_ENABLED`
-- `LLM_BROWSER_SEMANTIC_CACHE_TTL_MS`
-- `LLM_BROWSER_SEMANTIC_CACHE_MAX_ENTRIES`
+- `PRISM_PORT`
+- `PRISM_RATE_LIMIT_PER_MINUTE`
+- `PRISM_NAVIGATE_RATE_LIMIT_PER_MINUTE`
+- `PRISM_SCREENSHOT_RATE_LIMIT_PER_MINUTE`
+- `PRISM_DOMAIN_WHITELIST`
+- `PRISM_DOMAIN_BLACKLIST`
+- `PRISM_AUDIT_ENABLED`
+- `PRISM_PLUGINS_ENABLED`
+- `PRISM_SAM_ENABLED`
+- `PRISM_PLUGINS_DIR`
+- `PRISM_FILE_ROOT`
+- `PRISM_MAX_FILE_BYTES`
+- `PRISM_FILE_DELETE_ENABLED`
+- `PRISM_SEMANTIC_CACHE_ENABLED`
+- `PRISM_SEMANTIC_CACHE_TTL_MS`
+- `PRISM_SEMANTIC_CACHE_MAX_ENTRIES`
+
+Legacy `LLM_BROWSER_*` environment variables are still accepted as aliases so existing deployments keep working.

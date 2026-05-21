@@ -2,7 +2,7 @@
  * MCP (Model Context Protocol) Server - Enhanced & Stabilized
  * ============================================================
  *
- * Full production-ready MCP server for LLM Browser with:
+ * Full production-ready MCP server for Prism with:
  * - Session cleanup on disconnect
  * - Browser crash recovery with respawn
  * - Action timeout with global timeout
@@ -269,7 +269,7 @@ class McpServer {
 
     this.server = new Server(
       {
-        name: 'llm-browser',
+        name: 'prism',
         version: '2.3.0',
       },
       {
@@ -692,7 +692,7 @@ auto_bounce: {
           name: 'browser_visual',
           description:
             'Return a viewport screenshot with the agent cursor overlay and last pointer position. ' +
-            'Use to visually inspect what the browser is doing; set LLM_BROWSER_HEADLESS=false for a headed Playwright window.',
+            'Use to visually inspect what the browser is doing; set PRISM_HEADLESS=false for a headed Playwright window. LLM_BROWSER_HEADLESS remains supported as a legacy alias.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -1650,7 +1650,7 @@ throw enhancedError;
             url: result.data?.url,
             title: result.data?.title,
             headless: config.headless,
-            headed_hint: config.headless ? 'Set LLM_BROWSER_HEADLESS=false before starting MCP to see a live Playwright window.' : undefined,
+            headed_hint: config.headless ? 'Set PRISM_HEADLESS=false before starting MCP to see a live Playwright window.' : undefined,
           }, null, 2),
         },
       ],
@@ -3367,7 +3367,7 @@ private async handleListTabs(): Promise<any> {
     if (transport === 'stdio') {
       const stdioTransport = new StdioServerTransport();
       await this.server.connect(stdioTransport);
-      console.error('LLM Browser MCP Server running on stdio');
+      console.error('Prism MCP Server running on stdio');
     } else {
       // SSE transport would be initialized here
       throw new Error('SSE transport not yet implemented');

@@ -38,6 +38,7 @@ export interface SecurityConfig {
   session_timeout_seconds: number;
   max_actions_per_session: number;
   degradation_level: 'normal' | 'moderate' | 'severe';
+  websocket_auth_required: boolean;
 }
 
 export interface MonitoringConfig {
@@ -55,6 +56,7 @@ export interface PluginRegistryConfig {
 export interface FileConfig {
   root_dir: string;
   max_file_bytes: number;
+  max_session_bytes: number;
   allow_delete: boolean;
 }
 
@@ -98,7 +100,7 @@ export class ConfigurationManager {
       },
       browser: {
         viewport: { width: 1280, height: 720 },
-        user_agent: 'LLM-Browser/1.0',
+        user_agent: envString('PRISM_USER_AGENT', envString('LLM_BROWSER_USER_AGENT', 'Prism/1.0')),
         ignore_https_errors: false,
         max_tabs_per_session: envNumber('LLM_BROWSER_MAX_TABS_PER_SESSION', 5),
         memory_limit_mb: envNumber('LLM_BROWSER_MEMORY_LIMIT_MB', 2048),
@@ -135,6 +137,7 @@ export class ConfigurationManager {
         session_timeout_seconds: envNumber('LLM_BROWSER_SESSION_TIMEOUT_SECONDS', 1800),
         max_actions_per_session: envNumber('LLM_BROWSER_MAX_ACTIONS_PER_SESSION', 1000),
         degradation_level: envEnum('LLM_BROWSER_DEGRADATION_LEVEL', ['normal', 'moderate', 'severe'], 'normal'),
+        websocket_auth_required: envBoolean('LLM_BROWSER_WS_AUTH_REQUIRED', true),
       },
       monitoring: {
         audit_enabled: envBoolean('LLM_BROWSER_AUDIT_ENABLED', true),
@@ -142,13 +145,14 @@ export class ConfigurationManager {
       },
       plugin_registry: {
         enabled: envBoolean('LLM_BROWSER_PLUGINS_ENABLED', true),
-        plugins_dir: process.env.LLM_BROWSER_PLUGINS_DIR ?? './plugins',
+        plugins_dir: envString('LLM_BROWSER_PLUGINS_DIR', './plugins'),
         hot_reload_enabled: envBoolean('LLM_BROWSER_PLUGIN_HOT_RELOAD', false),
         sam_enabled: envBoolean('LLM_BROWSER_SAM_ENABLED', true),
       },
       file: {
-        root_dir: process.env.LLM_BROWSER_FILE_ROOT ?? './.llm-browser/files',
+        root_dir: envString('LLM_BROWSER_FILE_ROOT', './.prism/files'),
         max_file_bytes: envNumber('LLM_BROWSER_MAX_FILE_BYTES', 25 * 1024 * 1024),
+        max_session_bytes: envNumber('LLM_BROWSER_MAX_SESSION_FILE_BYTES', 250 * 1024 * 1024),
         allow_delete: envBoolean('LLM_BROWSER_FILE_DELETE_ENABLED', true),
       },
     };
@@ -164,20 +168,20 @@ export class ConfigurationManager {
 }
 
 function envNumber(name: string, fallback: number): number {
-  const value = process.env[name];
+  const value = envRaw(name);
   if (!value) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function envBoolean(name: string, fallback: boolean): boolean {
-  const value = process.env[name];
+  const value = envRaw(name);
   if (!value) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
 }
 
 function envCsv(name: string): string[] {
-  const value = process.env[name];
+  const value = envRaw(name);
   if (!value) return [];
   return value
     .split(',')
@@ -186,8 +190,17 @@ function envCsv(name: string): string[] {
 }
 
 function envEnum<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
-  const value = process.env[name]?.toLowerCase();
+  const value = envRaw(name)?.toLowerCase();
   return allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+function envString(name: string, fallback: string): string {
+  return envRaw(name) ?? fallback;
+}
+
+function envRaw(name: string): string | undefined {
+  const prismName = name.startsWith('LLM_BROWSER_') ? `PRISM_${name.slice('LLM_BROWSER_'.length)}` : name;
+  return process.env[prismName] ?? process.env[name];
 }
 
 function deepMerge<T extends Record<string, any>>(base: T, patch: Partial<T>): T {

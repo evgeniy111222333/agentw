@@ -161,7 +161,8 @@ export async function semKey(page: Page): Promise<{ key: string; url: string; ti
 
 function cacheDomState(): Record<string, any> {
     const clone = document.documentElement.cloneNode(true) as Element;
-    for (const el of Array.from(clone.querySelectorAll('[data-llm-browser-id]'))) {
+    for (const el of Array.from(clone.querySelectorAll('[data-prism-id], [data-llm-browser-id]'))) {
+      el.removeAttribute('data-prism-id');
       el.removeAttribute('data-llm-browser-id');
     }
     const controls = Array.from(document.querySelectorAll('input, textarea, select')).map((node) => {
@@ -187,7 +188,8 @@ function cacheDomState(): Record<string, any> {
           if (!root) return undefined;
           const template = document.createElement('template');
           template.innerHTML = root.innerHTML;
-          for (const shadowEl of Array.from(template.content.querySelectorAll('[data-llm-browser-id]'))) {
+          for (const shadowEl of Array.from(template.content.querySelectorAll('[data-prism-id], [data-llm-browser-id]'))) {
+            shadowEl.removeAttribute('data-prism-id');
             shadowEl.removeAttribute('data-llm-browser-id');
           }
           return {

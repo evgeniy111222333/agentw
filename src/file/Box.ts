@@ -52,6 +52,7 @@ export class Box {
     const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data, encoding);
     this.checkSize(buffer.byteLength);
     const target = await this.reserve(sessionId, area, requestedName);
+    await this.checkSessionQuota(sessionId, buffer.byteLength);
     await fs.writeFile(target.absolutePath, buffer);
     return {
       info: await this.info(sessionId, target.absolutePath),
@@ -69,6 +70,8 @@ export class Box {
     this.checkSize(buffer.byteLength);
     const absolutePath = await this.filePath(sessionId, filePath, 'tmp');
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    const existing = await fs.stat(absolutePath).then((stat) => stat.isFile() ? stat.size : 0).catch(() => 0);
+    await this.checkSessionQuota(sessionId, buffer.byteLength - existing);
     await fs.writeFile(absolutePath, buffer);
     return {
       info: await this.info(sessionId, absolutePath),
@@ -102,6 +105,18 @@ export class Box {
       mime_type: mimeFor(absolutePath),
       modified_at: stat.mtime.toISOString(),
     };
+  }
+
+  async adoptReservedFile(sessionId: string, absolutePath: string): Promise<BoxFile> {
+    const info = await this.info(sessionId, absolutePath);
+    this.checkSize(info.size);
+    try {
+      await this.checkSessionQuota(sessionId, 0);
+    } catch (error) {
+      await fs.rm(absolutePath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+    return info;
   }
 
   async list(sessionId: string, requestedPath = '.', recursive = false): Promise<Array<BoxFile & { type: 'file' | 'directory' }>> {
@@ -152,6 +167,31 @@ export class Box {
     if (bytes > this.config().max_file_bytes) {
       throw new Error(`File exceeds max_file_bytes (${this.config().max_file_bytes})`);
     }
+  }
+
+  private async checkSessionQuota(sessionId: string, additionalBytes: number): Promise<void> {
+    const max = this.config().max_session_bytes;
+    if (max <= 0) return;
+    const used = await this.sessionBytes(sessionId);
+    const next = used + Math.max(0, additionalBytes);
+    if (next > max) {
+      throw new Error(`Session file quota exceeded (${next}/${max} bytes)`);
+    }
+  }
+
+  private async sessionBytes(sessionId: string): Promise<number> {
+    const root = await this.sessionRoot(sessionId);
+    let total = 0;
+    const visit = async (dir: string): Promise<void> => {
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const absolutePath = path.join(dir, entry.name);
+        if (entry.isDirectory()) await visit(absolutePath);
+        else if (entry.isFile()) total += (await fs.stat(absolutePath)).size;
+      }
+    };
+    await visit(root);
+    return total;
   }
 
   private async uniquePath(initial: string): Promise<string> {
