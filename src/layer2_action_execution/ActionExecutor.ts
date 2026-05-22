@@ -1,4 +1,4 @@
-import { Frame, Locator, Page } from 'playwright';
+import { Frame, Locator, Page, Request } from 'playwright';
 import { BrowserCore } from '../layer1_browser_core/BrowserCore';
 import { SemanticElement } from '../common/types';
 import { globalEventBus } from '../common/EventBus';
@@ -104,6 +104,10 @@ export class ActionExecutor {
   private visualStates = new Map<string, VisualState>();
   private scriptStacks = new Map<string, string[]>();
   private locatorHints = new Map<string, { frameUrl: string; at: number }>();
+  private activePageRequests = new WeakMap<Page, {
+    requests: Map<Request, number>;
+    lastFinishedAt: number;
+  }>();
 
   constructor(
     private browserCore: BrowserCore,
@@ -2196,11 +2200,84 @@ export class ActionExecutor {
     await this.shortStabilization(page, contextDestroyed || Boolean(nav) ? 2000 : 1000);
   }
 
+  private initRequestTracking(page: Page): void {
+    if (this.activePageRequests.has(page)) return;
+    const state = {
+      requests: new Map<Request, number>(),
+      lastFinishedAt: 0,
+    };
+    this.activePageRequests.set(page, state);
+
+    try {
+      page.on('request', (request) => {
+        try {
+          const type = request.resourceType();
+          if (type === 'websocket' || type === 'eventsource') {
+            return;
+          }
+          state.requests.set(request, Date.now());
+        } catch {
+          // Ignore error
+        }
+      });
+
+      const removeRequest = (request: Request) => {
+        state.requests.delete(request);
+        state.lastFinishedAt = Date.now();
+      };
+
+      page.on('requestfinished', removeRequest);
+      page.on('requestfailed', removeRequest);
+
+      page.on('close', () => {
+        this.activePageRequests.delete(page);
+      });
+    } catch {
+      // Ignore error if page closed/detached
+    }
+  }
+
+  private async waitForNetworkIdleCustom(page: Page, timeoutMs: number): Promise<void> {
+    this.initRequestTracking(page);
+    const tracker = this.activePageRequests.get(page);
+    if (!tracker) return;
+
+    const start = Date.now();
+    const debounceMs = 200; // 200ms quiet window
+
+    const isIdle = () => {
+      const now = Date.now();
+      let activeCount = 0;
+      for (const [req, startTime] of tracker.requests.entries()) {
+        if (now - startTime < 1500) {
+          activeCount++;
+        }
+      }
+      return activeCount === 0 && (now - tracker.lastFinishedAt >= debounceMs);
+    };
+
+    if (isIdle()) {
+      return;
+    }
+
+    return new Promise<void>((resolve) => {
+      const interval = setInterval(() => {
+        if (isIdle() || Date.now() - start >= timeoutMs) {
+          clearInterval(interval);
+          resolve();
+        }
+      }, 50);
+    });
+  }
+
   private async shortStabilization(page: Page, timeoutMs = 1000): Promise<void> {
+    this.initRequestTracking(page);
     const domTimeout = Math.min(timeoutMs, 1000);
     const networkTimeout = Math.min(timeoutMs, Number(process.env.PRISM_ACTION_NETWORK_IDLE_MS ?? process.env.LLM_BROWSER_ACTION_NETWORK_IDLE_MS ?? 750));
     await page.waitForLoadState('domcontentloaded', { timeout: domTimeout }).catch(() => undefined);
-    if (networkTimeout > 0) await page.waitForLoadState('networkidle', { timeout: networkTimeout }).catch(() => undefined);
+    if (networkTimeout > 0) {
+      await this.waitForNetworkIdleCustom(page, networkTimeout).catch(() => undefined);
+    }
     await page.waitForTimeout(Math.min(100, Number(process.env.PRISM_ACTION_SETTLE_MS ?? process.env.LLM_BROWSER_ACTION_SETTLE_MS ?? 100)));
   }
 

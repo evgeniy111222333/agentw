@@ -94,6 +94,61 @@ Local SDK tests:
 npm run py:test
 ```
 
+## Model Context Protocol (MCP) Server
+
+Prism can run as an MCP server, allowing LLM agents to control the browser runtime directly. This interface is fully compatible with Claude Desktop and other MCP hosts.
+
+### 1. Connection & Configuration
+
+Before connecting, build the project:
+```bash
+npm run build
+```
+
+Add the following config to your host's configuration file (e.g., `claude_desktop_config.json` for Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "prism": {
+      "command": "node",
+      "args": ["/absolute/path/to/llm-browser/dist/mcp/index.js"]
+    }
+  }
+}
+```
+
+### 2. Available MCP Tools
+
+Prism registers **20 specialized tools** grouped by functionality:
+
+| Tool Name | Description | SDK / REST Equivalent |
+| --- | --- | --- |
+| `browser_navigate` | Navigate the browser to a URL | `session.navigate()` / `POST .../actions` |
+| `browser_snapshot` | Fetch the semantic page snapshot | `session.snapshot()` / `GET .../snapshot` |
+| `browser_action` | Execute an action (click, type, scroll, etc.) | `session.click()`, `session.type()`, etc. |
+| `browser_run_flow` | Run a declarative multi-step sequence | `session.sequence()`, `session.fillForm()`, etc. |
+| `browser_evaluate` | Run arbitrary JS script inside the page | `session.evaluate()` / `POST .../actions` |
+| `browser_visual` | Get the semantic markdown/structure representation | `session.visual()` / `POST .../actions` |
+| `browser_list_tabs` | Retrieve all open tabs in the session | `session.tabs()` / `GET .../tabs` |
+| `browser_open_tab` | Open a new tab in the session | `session.openTab()` / `POST .../tabs` |
+| `browser_switch_tab` | Switch the active focus to a different tab | `session.switchTab()` / `POST .../tabs/:tabId/switch` |
+| `browser_close_tab` | Close an existing tab | `session.closeTab()` / `DELETE .../tabs/:tabId` |
+| `browser_screenshot` | Capture screenshot of the active page | `session.screenshot()` / `POST .../actions` |
+| `browser_diagnostics` | Return browser state and auth diagnostics | `session.diagnostics()` / `GET .../diagnostics` |
+| `browser_element_search` | Search for element matching selector | `session.elementSearch()` / `POST .../actions` |
+| `browser_paginate` | Search and traverse results page by page | `session.paginate()` / `POST .../actions` |
+| `browser_wait_for` | Wait for a state condition (e.g. element visible) | `session.waitFor()` / `POST .../actions` |
+| `browser_session_info` | Get active session information | `session.info()` / `GET .../sessions/:id` |
+| `browser_metrics` | Retrieve active browser/runtime metrics | `GET /metrics` |
+| `browser_close_session`| Terminate and clean up the browser session | `session.close()` / `DELETE .../sessions/:id` |
+| `browser_restart` | Restart the browser session | `session.restart()` / `POST .../actions` |
+| `browser_ping` | Check the MCP server health status | `GET /health` |
+
+### 3. Detailed Parameter Specifications
+
+The `browser_action` tool accepts complex JSON parameter blocks. For a full list of schemas and detailed guidelines on implementing forms (`fill_form`), multi-field verification (`fill_and_verify`), automated login flows (`login_flow`), search traversal (`search_and_paginate`), and custom scripting (`define_script`), see the [MCP Agent Instructions](file:///e:/agenw/llm-browser/src/mcp/instructions.md).
+
 ## Auth State
 
 Semantic snapshots include `snapshot.auth`, and session diagnostics include the latest `session.auth`.
