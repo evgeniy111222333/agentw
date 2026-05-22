@@ -25,7 +25,7 @@ export class ApiServer {
   private httpServer: Server | null = null;
   private browserCore = new BrowserCore();
   private stateManager = new StateManagementLayer();
-  private actionExecutor = new ActionExecutor(this.browserCore);
+  private actionExecutor = new ActionExecutor(this.browserCore, undefined, this.stateManager);
   private pluginRegistry = createDefaultPluginRegistry(ConfigurationManager.getInstance().getConfig().plugin_registry);
   private semanticLayer = new SemanticLayer({ pluginRegistry: this.pluginRegistry });
   private previousSnapshots: Map<string, SemanticSnapshot> = new Map();
@@ -428,6 +428,27 @@ export class ApiServer {
         cookies: [],
         updated_at: session.updated_at,
       });
+    });
+
+    this.app.post('/api/v2/sessions/:id/resume', async (req, res) => {
+      try {
+        const session = this.stateManager.getSessionState(req.params.id);
+        if (!session) {
+          return this.sendRestError(res, new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found'));
+        }
+        if (session.status === 'paused') {
+          this.stateManager.updateSession(req.params.id, { status: 'active' });
+          await globalEventBus.publish('stream_event', {
+            type: 'session_resumed',
+            session_id: req.params.id,
+            timestamp: new Date().toISOString(),
+            data: { reason: 'manual_resume' },
+          });
+        }
+        res.json({ status: 'active', session_id: req.params.id });
+      } catch (error: any) {
+        this.sendRestError(res, normalizeError(error, { operation: 'resume_session' }));
+      }
     });
 
     this.app.get('/api/v2/sessions/:id', (req, res) => {

@@ -71,6 +71,7 @@ const actionSchemas: Record<string, ActionSchema> = {
   check: { target: 'required', retryable: true },
   clear: { target: 'required', retryable: true },
   clear_search: { target: 'required', retryable: true },
+  solve_captcha: { target: 'none' },
   append: { target: 'required', requiredParams: ['text'], retryable: true },
   select_all: { target: 'required', retryable: true },
   set_value: { target: 'required', requiredParams: ['value'], retryable: true },
@@ -828,8 +829,15 @@ export class CommandRouter {
   }
 
   private validateCommand(command: AgentCommand): ResolvedAction {
-    if (!command.session_id || !this.stateManager.getSessionState(command.session_id)) {
+    if (!command.session_id) {
       throw new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found', { session_id: command.session_id });
+    }
+    const sessionState = this.stateManager.getSessionState(command.session_id);
+    if (!sessionState) {
+      throw new LlmBrowserError('SESSION_NOT_FOUND', 'Session not found', { session_id: command.session_id });
+    }
+    if (sessionState.status === 'paused') {
+      throw new LlmBrowserError('SESSION_PAUSED', 'Session is paused due to CAPTCHA detection');
     }
 
     if (command.action === 'run_flow' || command.action === 'browser_run_flow') {

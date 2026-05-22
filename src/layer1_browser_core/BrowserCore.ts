@@ -48,6 +48,7 @@ export class BrowserCore {
         storageState: options.storageState,
       });
       await context.addInitScript(shadowDomHook);
+      await context.addInitScript(stealthScript);
 
       this.contexts.set(sessionId, context);
       this.pages.set(sessionId, new Map());
@@ -371,5 +372,69 @@ function shadowDomHook(): void {
     const root = original.call(this, init);
     roots.push({ host: this, root, mode: init.mode });
     return root;
+  };
+}
+
+function stealthScript(): void {
+  // 1. Overwrite navigator.webdriver
+  Object.defineProperty(navigator, 'webdriver', {
+    get: () => false,
+  });
+
+  // 2. Overwrite navigator.languages
+  Object.defineProperty(navigator, 'languages', {
+    get: () => ['en-US', 'en'],
+  });
+
+  // 3. Mock navigator.plugins
+  const mockPlugins = () => {
+    const plugins = [
+      { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chrome PDF Viewer', filename: 'mhjfbgoaodhbgedhhffmhnhiigihneae', description: 'Google Chrome PDF Viewer' },
+      { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
+    ];
+    const pluginList = Object.create(PluginArray.prototype);
+    plugins.forEach((p, i) => {
+      const plugin = Object.create(Plugin.prototype);
+      Object.defineProperty(plugin, 'name', { get: () => p.name });
+      Object.defineProperty(plugin, 'filename', { get: () => p.filename });
+      Object.defineProperty(plugin, 'description', { get: () => p.description });
+      Object.defineProperty(pluginList, i, { value: plugin });
+      Object.defineProperty(pluginList, p.name, { value: plugin });
+    });
+    Object.defineProperty(pluginList, 'length', { get: () => plugins.length });
+    Object.defineProperty(navigator, 'plugins', { get: () => pluginList });
+  };
+  mockPlugins();
+
+  // 4. Overwrite navigator.permissions.query
+  if (navigator.permissions && navigator.permissions.query) {
+    const originalQuery = navigator.permissions.query;
+    navigator.permissions.query = (parameters) =>
+      parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission } as unknown as PermissionStatus)
+        : originalQuery(parameters);
+  }
+
+  // 5. Mock WebGL vendor/renderer
+  const getParameter = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function(parameter: number) {
+    // UNMASKED_VENDOR_WEBGL
+    if (parameter === 37445) {
+      return 'Intel Inc.';
+    }
+    // UNMASKED_RENDERER_WEBGL
+    if (parameter === 37446) {
+      return 'Intel(R) Iris(TM) Plus Graphics 640';
+    }
+    return getParameter.call(this, parameter);
+  };
+
+  // 6. Mock window.chrome
+  (window as any).chrome = {
+    runtime: {},
+    loadTimes: function() {},
+    csi: function() {},
+    app: {}
   };
 }

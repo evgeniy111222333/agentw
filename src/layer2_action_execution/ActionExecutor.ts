@@ -8,6 +8,8 @@ import { globalSemCache } from '../cache/Sem';
 import { classifyActionError, shouldRetry, retryDelay, LlmBrowserError, RETRY_CONFIG } from '../common/errors';
 import { OpStore } from '../op/Op';
 import { globalMetrics } from '../common/MetricsRegistry';
+import { StateManagementLayer } from '../layer3_state_management/StateManagementLayer';
+import { CaptchaDetector } from './CaptchaDetector';
 
 /**
  * Concept §5.5: Risk scores per action (0-100).
@@ -111,7 +113,8 @@ export class ActionExecutor {
 
   constructor(
     private browserCore: BrowserCore,
-    private box = new Box()
+    private box = new Box(),
+    private stateManager?: StateManagementLayer
   ) {}
 
   /** Get risk score for an action (0-100). Concept §5.2.2 / §8.4. */
@@ -285,6 +288,9 @@ export class ActionExecutor {
         if (params.button) clickOptions.button = params.button; // right, middle
         if (params.click_count) clickOptions.clickCount = params.click_count; // dblclick=2
         const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'click');
+        if (resolvedTarget && typeof resolvedTarget.x === 'number' && typeof resolvedTarget.y === 'number') {
+          await this.simulateHumanMouse(sessionId, page, resolvedTarget.x, resolvedTarget.y);
+        }
         await locator.click(clickOptions);
         await this.shortStabilization(page);
         return resolvedTarget;
@@ -293,6 +299,9 @@ export class ActionExecutor {
       case 'interact': {
         const locator = await this.resolveActionableLocator(page, targetId, action, params);
         const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'interact');
+        if (resolvedTarget && typeof resolvedTarget.x === 'number' && typeof resolvedTarget.y === 'number') {
+          await this.simulateHumanMouse(sessionId, page, resolvedTarget.x, resolvedTarget.y);
+        }
         await locator.click({ timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
         return { interacted: true, ...resolvedTarget };
@@ -302,11 +311,13 @@ export class ActionExecutor {
         const locator = await this.resolveActionableLocator(page, targetId, action, params);
         if (params.text === undefined) throw new Error('Text is required for type action');
         const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'type');
-        if (params.clear !== false) {
-          await locator.fill(String(params.text), { timeout: params.timeout_ms ?? 5000 });
-        } else {
-          await locator.type(String(params.text), { delay: params.delay ?? 0, timeout: params.timeout_ms ?? 5000 });
+        if (resolvedTarget && typeof resolvedTarget.x === 'number' && typeof resolvedTarget.y === 'number') {
+          await this.simulateHumanMouse(sessionId, page, resolvedTarget.x, resolvedTarget.y);
         }
+        if (params.clear !== false) {
+          await locator.fill('', { timeout: params.timeout_ms ?? 5000 }).catch(() => undefined);
+        }
+        await this.simulateHumanType(locator, String(params.text), params.timeout_ms ?? 5000);
         if (params.press_enter) {
           await locator.press('Enter');
           await this.shortStabilization(page);
@@ -404,9 +415,41 @@ export class ActionExecutor {
       case 'hover': {
         const locator = await this.resolveActionableLocator(page, targetId, action, params);
         const resolvedTarget = await this.trackVisualCursor(sessionId, page, locator, 'hover');
+        if (resolvedTarget && typeof resolvedTarget.x === 'number' && typeof resolvedTarget.y === 'number') {
+          await this.simulateHumanMouse(sessionId, page, resolvedTarget.x, resolvedTarget.y);
+        }
         await locator.hover({ timeout: params.timeout_ms ?? 5000 });
         await this.shortStabilization(page);
         return resolvedTarget;
+      }
+
+      case 'solve_captcha': {
+        const captcha = await CaptchaDetector.detect(page);
+        if (!captcha) {
+          return { solved: false, reason: 'No CAPTCHA detected' };
+        }
+        const provider = params.provider || process.env.CAPTCHA_PROVIDER || '2captcha';
+        let apiKey = params.api_key || params.apiKey;
+        if (!apiKey) {
+          if (provider === '2captcha') apiKey = process.env.TWOCAPTCHA_API_KEY;
+          else if (provider === 'capmonster') apiKey = process.env.CAPMONSTER_API_KEY;
+          else if (provider === 'anticaptcha') apiKey = process.env.ANTICAPTCHA_API_KEY;
+        }
+
+        if (!apiKey) {
+          await this.pauseSession(sessionId, 'Missing CAPTCHA API key');
+          throw new LlmBrowserError('SESSION_PAUSED', 'CAPTCHA detected but no API key configured. Session paused for human solving.');
+        }
+
+        try {
+          const timeoutMs = params.timeout_ms ?? params.timeout ?? 120000;
+          const token = await CaptchaDetector.solve(captcha, provider, apiKey, timeoutMs);
+          await CaptchaDetector.injectToken(page, captcha, token);
+          return { solved: true, type: captcha.type, provider };
+        } catch (solveError: any) {
+          await this.pauseSession(sessionId, `CAPTCHA solving failed: ${solveError.message}`);
+          throw new LlmBrowserError('SESSION_PAUSED', `CAPTCHA solving failed: ${solveError.message}. Session paused for human solving.`);
+        }
       }
 
       case 'media_control':
@@ -2093,6 +2136,67 @@ export class ActionExecutor {
     this.visualStates.set(sessionId, state);
     await this.injectVisualCursor(page, state).catch(() => undefined);
     return resolvedTargetPayload(locator, state);
+  }
+
+  async simulateHumanMouse(sessionId: string, page: Page, x: number, y: number): Promise<void> {
+    const startState = this.visualStates.get(sessionId);
+    const startX = startState ? startState.x : 0;
+    const startY = startState ? startState.y : 0;
+
+    const dx = x - startX;
+    const dy = y - startY;
+    const distance = Math.hypot(dx, dy);
+
+    if (distance < 5) {
+      await page.mouse.move(x, y);
+      return;
+    }
+
+    const ctrl1X = startX + dx * 0.25 + (Math.random() - 0.5) * 100;
+    const ctrl1Y = startY + dy * 0.25 + (Math.random() - 0.5) * 100;
+    const ctrl2X = startX + dx * 0.75 + (Math.random() - 0.5) * 100;
+    const ctrl2Y = startY + dy * 0.75 + (Math.random() - 0.5) * 100;
+
+    const steps = Math.min(30, Math.max(10, Math.floor(distance / 15)));
+
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const mt = 1 - t;
+      const curX = Math.round(
+        mt * mt * mt * startX +
+        3 * mt * mt * t * ctrl1X +
+        3 * mt * t * t * ctrl2X +
+        t * t * t * x
+      );
+      const curY = Math.round(
+        mt * mt * mt * startY +
+        3 * mt * mt * t * ctrl1Y +
+        3 * mt * t * t * ctrl2Y +
+        t * t * t * y
+      );
+
+      await page.mouse.move(curX, curY);
+      await new Promise((resolve) => setTimeout(resolve, 5 + Math.random() * 10));
+    }
+  }
+
+  async simulateHumanType(locator: Locator, text: string, timeoutMs: number): Promise<void> {
+    await locator.focus({ timeout: timeoutMs });
+    for (const char of text) {
+      await locator.type(char, { delay: 50 + Math.random() * 100, timeout: timeoutMs });
+    }
+  }
+
+  private async pauseSession(sessionId: string, reason: string): Promise<void> {
+    if (this.stateManager) {
+      this.stateManager.updateSession(sessionId, { status: 'paused' });
+    }
+    await globalEventBus.publish('stream_event', {
+      type: 'session_paused',
+      session_id: sessionId,
+      timestamp: new Date().toISOString(),
+      data: { reason },
+    });
   }
 
   private async injectVisualCursor(page: Page, state: VisualState): Promise<void> {

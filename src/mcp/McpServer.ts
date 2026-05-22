@@ -553,6 +553,7 @@ auto_bounce: {
                   'pdf: {file_name: string, format?: "A4"|"Letter", print_background?: boolean, landscape?: boolean, scale?: number, margin?: string} ' +
                   'fs: {operation: "list"|"read"|"write"|"delete", path: string, content?: string, encoding?: string} ' +
                   'invalidate_cache: {cache_key?: string} (clear specific or all caches) ' +
+                  'solve_captcha: {provider?: "2captcha"|"capmonster"|"anticaptcha", api_key?: string, timeout_ms?: number} (solves detected captchas) ' +
                   'visual: {full_page?: boolean, show_cursor?: boolean} (same as browser_visual tool)',
               },
               auto_snapshot: {

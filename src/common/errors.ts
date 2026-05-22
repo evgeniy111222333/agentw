@@ -22,7 +22,8 @@ export type LlmBrowserErrorCode =
   | 'STALE_ELEMENT'
   | 'TIMEOUT_ACTION'
   | 'TYPE_MISMATCH'
-  | 'VALIDATION_ERROR';
+  | 'VALIDATION_ERROR'
+  | 'SESSION_PAUSED';
 
 /**
  * Concept §5.5: Error Classification
@@ -63,6 +64,7 @@ const httpStatusByCode: Record<LlmBrowserErrorCode, number> = {
   SCRIPT_NOT_FOUND: 404,
   SECURITY_VIOLATION: 403,
   SESSION_NOT_FOUND: 404,
+  SESSION_PAUSED: 409,
   STALE_ELEMENT: 409,
   TIMEOUT_ACTION: 408,
   TYPE_MISMATCH: 400,
@@ -90,6 +92,7 @@ const errorClassByCode: Record<LlmBrowserErrorCode, ActionErrorClass> = {
   SCRIPT_NOT_FOUND: 'permanent',
   SECURITY_VIOLATION: 'permanent',
   SESSION_NOT_FOUND: 'permanent',
+  SESSION_PAUSED: 'permanent',
   STALE_ELEMENT: 'transient',
   TIMEOUT_ACTION: 'transient',
   TYPE_MISMATCH: 'permanent',
@@ -117,6 +120,7 @@ const recoverableByCode: Record<LlmBrowserErrorCode, boolean> = {
   SCRIPT_NOT_FOUND: false,
   SECURITY_VIOLATION: false,
   SESSION_NOT_FOUND: false,
+  SESSION_PAUSED: false,
   STALE_ELEMENT: true,
   TIMEOUT_ACTION: true,
   TYPE_MISMATCH: false,
@@ -151,6 +155,7 @@ export function normalizeError(error: unknown, context: Record<string, any> = {}
 }
 
 export function classifyErrorCode(message: string): LlmBrowserErrorCode {
+  if (/paused/i.test(message)) return 'SESSION_PAUSED';
   if (/rate limit/i.test(message)) return 'RATE_LIMIT_EXCEEDED';
   if (/access denied|permission/i.test(message)) return 'ACCESS_DENIED';
   if (/security|blocked|whitelist|blacklist|domain/i.test(message)) return 'SECURITY_VIOLATION';

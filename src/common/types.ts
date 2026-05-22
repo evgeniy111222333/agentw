@@ -286,7 +286,9 @@ export type StreamEventType =
   | 'action_failed'
   | 'error'
   | 'security'
-  | 'heartbeat';
+  | 'heartbeat'
+  | 'session_paused'
+  | 'session_resumed';
 
 export interface RuntimeEvent {
   event_id: string;
@@ -337,7 +339,7 @@ export interface SessionState {
   session_id: string;
   created_at: string;
   updated_at: string;
-  status: 'active' | 'idle' | 'closed' | 'suspended' | 'expired';
+  status: 'active' | 'idle' | 'closed' | 'suspended' | 'expired' | 'paused';
   current_url: string;
   tabs: TabState[];
   cookies: any[];

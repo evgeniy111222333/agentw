@@ -104,7 +104,7 @@ export class ConfigurationManager {
         ignore_https_errors: false,
         max_tabs_per_session: envNumber('LLM_BROWSER_MAX_TABS_PER_SESSION', 5),
         memory_limit_mb: envNumber('LLM_BROWSER_MEMORY_LIMIT_MB', 2048),
-        headless: envBoolean('LLM_BROWSER_HEADLESS', true),
+        headless: envBoolean('LLM_BROWSER_HEADLESS', false),
         slow_mo_ms: envNumber('LLM_BROWSER_SLOW_MO_MS', 0),
       },
       semantic: {

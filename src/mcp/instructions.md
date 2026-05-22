@@ -192,3 +192,48 @@ For modern Single Page Applications (SPAs) or pages loading content dynamically 
     "timeout_ms": 10000
   }
   ```
+
+---
+
+## 7. CAPTCHA Handling & Human-in-the-Loop (HITL)
+
+Prism features a 3-level CAPTCHA bypass system.
+
+### A. Evasion & Human Simulation (Automatic)
+Level 1 is fully automatic. Prism mocks browser fingerprints (WebGl, navigator plugins, languages, webdriver flag) and simulates natural human keyboard delays and Bezier mouse movements. No agent action is required.
+
+### B. Automated Token Solving (`solve_captcha`)
+If a CAPTCHA (reCAPTCHA, hCaptcha, Cloudflare Turnstile) is detected on the page, call the `solve_captcha` action to attempt automated token-based resolution.
+
+- **Action Name**: `solve_captcha`
+- **Params Schema**:
+  ```json
+  {
+    "provider": "string (optional, '2captcha' | 'capmonster' | 'anticaptcha')",
+    "api_key": "string (optional, API key for the chosen provider)",
+    "timeout_ms": "number (optional, default 120000)"
+  }
+  ```
+- **Example**:
+  ```json
+  {
+    "action": "solve_captcha",
+    "params": {
+      "provider": "2captcha",
+      "timeout_ms": 60000
+    }
+  }
+  ```
+- **Response**:
+  - Success: `{ "solved": true, "type": "recaptcha", "provider": "2captcha" }`
+  - No CAPTCHA found: `{ "solved": false, "reason": "No CAPTCHA detected" }`
+
+### C. Human-in-the-Loop (HITL) Fallback (`SESSION_PAUSED`)
+If automated solving fails, or if no API keys are configured, Prism pauses the session.
+- **Error Response**: The server will reject actions with a `SESSION_PAUSED` error code (HTTP `409 Conflict`).
+- **Required Agent Action**:
+  1. Inform the user/client application that execution is paused for human CAPTCHA solving.
+  2. Wait for the user/client to solve the CAPTCHA and call the resume endpoint:
+     `POST /api/v2/sessions/:id/resume`
+  3. Once resumed (which emits a WebSocket `session_resumed` event and sets status back to `active`), you may proceed with browsing.
+
